@@ -7,7 +7,9 @@ retarget hardware:
 
     LIMBIC_PORT     serial port (e.g. COM7, /dev/cu.usbserial-10). If unset we
                     auto-detect; if detection fails we fall back to the mock.
-    LIMBIC_ROBOT_ID robot id/name used by the underlying SDK (default "limbic").
+    LIMBIC_ROBOT_ID robot id/name used by the underlying SDK (default "bronny",
+                    which is the calibration this physical arm is registered under
+                    — see ~/.cache/huggingface/lerobot/calibration/robots/).
     LIMBIC_BACKEND  "auto" | "real" | "mock" — which hardware backend to use.
 """
 
@@ -50,6 +52,6 @@ def load_config() -> ArmConfig:
     """Build an :class:`ArmConfig` from environment variables + auto-detection."""
     return ArmConfig(
         port=detect_serial_port(),                        # honours $LIMBIC_PORT
-        robot_id=os.environ.get("LIMBIC_ROBOT_ID", "limbic"),
+        robot_id=os.environ.get("LIMBIC_ROBOT_ID", "bronny"),
         backend=os.environ.get("LIMBIC_BACKEND", "auto").lower(),
     )
