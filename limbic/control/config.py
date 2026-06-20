@@ -28,12 +28,17 @@ GRIPPER_CLOSED = 10.0
 # Smooth-motion profile. Moves are interpolated into fine sub-steps with an
 # ease-in/ease-out velocity curve streamed at ~50 Hz, so the arm accelerates and
 # decelerates instead of jerking step-to-step.
+#
+# The per-step DELAYS are env-overridable so a simulation (the mock backend, the
+# web demo, the test suite) can run near-instantly without changing real-hardware
+# timing. Defaults match real motion; set e.g. LIMBIC_SMOOTH_DT=0.001 for a fast
+# mock. The step SIZES are fixed (they shape smoothness, not just speed).
 SMOOTH_STEP_DEG = 1.5   # transit speed: degrees of travel per sub-step
-SMOOTH_DT_S = 0.02      # seconds between sub-steps (~50 Hz)
+SMOOTH_DT_S = float(os.environ.get("LIMBIC_SMOOTH_DT", "0.02"))   # seconds between sub-steps (~50 Hz)
 SLOW_STEP_DEG = 1.0     # precision speed for descend/grasp/place: finer ...
-SLOW_DT_S = 0.06        # ... and ~3x slower for controlled fine motion
+SLOW_DT_S = float(os.environ.get("LIMBIC_SLOW_DT", "0.06"))       # ... and ~3x slower for controlled fine motion
 CONVERGE_TOL_DEG = 1.2  # hold the goal until servos settle within this band
-GRIPPER_SETTLE_S = 0.5  # let the claw fully actuate before moving on
+GRIPPER_SETTLE_S = float(os.environ.get("LIMBIC_GRIPPER_SETTLE", "0.5"))  # let the claw fully actuate
 
 
 @dataclass(frozen=True)

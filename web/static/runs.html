@@ -1,0 +1,41 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <title>limbic · run logs</title>
+  <link rel="stylesheet" href="/static/style.css" />
+</head>
+<body>
+  <header>
+    <span class="brand">limbic</span>
+    <nav>
+      <a href="/">Ask</a>
+      <a href="/runs" class="active">Logs</a>
+    </nav>
+  </header>
+
+  <main>
+    <h1>Run logs</h1>
+    <p class="sub">
+      Every run made through the console, newest first. Pick one to see its
+      thinking (the decisions made), data (what the arm sensed), and movements
+      (what it did). Failures that the arm couldn't complete are flagged.
+    </p>
+
+    <div class="row">
+      <button id="refresh" class="secondary">Refresh</button>
+      <span id="empty" class="meta hidden">No runs yet — go to the Ask page and run one.</span>
+    </div>
+
+    <div class="logs-layout">
+      <div id="runs-list" class="runs-list"></div>
+      <div id="detail" class="card">
+        <p class="meta">Select a run on the left to view its log streams.</p>
+      </div>
+    </div>
+  </main>
+
+  <script src="/static/app.js"></script>
+</body>
+</html>
