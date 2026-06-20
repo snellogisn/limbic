@@ -17,44 +17,24 @@ parameter schema clean while still wiring senses to live hardware.
 
 from __future__ import annotations
 
-import importlib
 import inspect
-import pkgutil
 from typing import Any
 
 from .. import runlog
+from .._core import Registry
+from . import library
 from .base import Input
 
-_REGISTRY: dict[str, Input] = {}
+# One shared auto-discovery registry, scoped to the Input subclasses in library/.
+_registry = Registry(Input, library)
+
+# Runtime objects (e.g. the connected arm) injected into input reads — see read().
 _CONTEXT: dict[str, Any] = {}
-_LOADED = False
-
-
-def _discover() -> None:
-    global _LOADED
-    if _LOADED:
-        return
-
-    from . import library  # local import to avoid a cycle at module load
-
-    for module_info in pkgutil.iter_modules(library.__path__):
-        module = importlib.import_module(f"{library.__name__}.{module_info.name}")
-        for _, obj in inspect.getmembers(module, inspect.isclass):
-            if (
-                issubclass(obj, Input)
-                and obj is not Input
-                and obj.__module__ == module.__name__
-                and getattr(obj, "name", "")
-            ):
-                _REGISTRY[obj.name] = obj()
-    _LOADED = True
 
 
 def reload() -> None:
     """Re-scan ``library/`` on next access (after adding/editing a sense)."""
-    global _LOADED
-    _REGISTRY.clear()
-    _LOADED = False
+    _registry.reload()
 
 
 def set_context(**context: Any) -> None:
@@ -64,24 +44,17 @@ def set_context(**context: Any) -> None:
 
 def all_inputs() -> dict[str, Input]:
     """Return ``{name: input}`` for every discovered sense."""
-    _discover()
-    return dict(_REGISTRY)
+    return _registry.all()  # type: ignore[return-value]
 
 
 def get(name: str) -> Input:
     """Return the instantiated input named ``name`` (raises ``KeyError`` if absent)."""
-    _discover()
-    if name not in _REGISTRY:
-        raise KeyError(
-            f"no input named '{name}'. Available: {', '.join(sorted(_REGISTRY))}"
-        )
-    return _REGISTRY[name]
+    return _registry.get(name)  # type: ignore[return-value]
 
 
 def catalog() -> list[dict[str, Any]]:
     """Return the browsable catalog: a ``describe()`` dict per input, for the LLM."""
-    _discover()
-    return [s.describe() for s in sorted(_REGISTRY.values(), key=lambda s: s.name)]
+    return _registry.catalog()
 
 
 def read(name: str, **kwargs: Any) -> Any:
@@ -90,8 +63,7 @@ def read(name: str, **kwargs: Any) -> Any:
     The LLM passes only the schema parameters; the registry adds context keys
     (like ``arm``) automatically if the input's ``read`` signature declares them.
     """
-    _discover()
-    sense = get(name)
+    sense = get(name)  # triggers discovery on first use
     # The LLM-facing query args, before runtime context (e.g. the arm) is mixed in.
     query_args = dict(kwargs)
     sig = inspect.signature(sense.read)

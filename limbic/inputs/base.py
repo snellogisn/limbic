@@ -22,39 +22,24 @@ from __future__ import annotations
 import abc
 from typing import Any
 
+from .._core import Capability
 
-class Input(abc.ABC):
-    """Base class for every sensory input (motors, cameras, ...)."""
 
-    #: Unique identifier the planner uses to refer to this input.
-    name: str = ""
-    #: One-line description for the browsable catalog.
-    summary: str = ""
-    #: JSON-schema-style argument spec: {arg: {"type", "description", "default"?}}.
-    parameters: dict[str, dict[str, Any]] = {}
+class Input(Capability):
+    """Base class for every sensory input (motors, cameras, ...).
+
+    Shares ``name`` / ``summary`` / ``parameters`` / ``describe()`` and the
+    required-argument check with :class:`~limbic._core.Capability`; an input just
+    adds :meth:`read`. Inputs are read-only — they observe, never command the arm.
+    """
+
+    _kind = "input"
 
     @abc.abstractmethod
     def read(self, **kwargs: Any) -> Any:
         """Return the current reading from this sense (must be JSON-serialisable)."""
 
-    @classmethod
-    def describe(cls) -> dict[str, Any]:
-        """Serialisable description (name, summary, parameter schema) for the LLM."""
-        return {
-            "name": cls.name,
-            "summary": cls.summary,
-            "parameters": cls.parameters,
-        }
-
     def __call__(self, **kwargs: Any) -> Any:
-        """Validate required args, then read. Missing required args raise clearly."""
-        missing = [
-            arg
-            for arg, spec in self.parameters.items()
-            if "default" not in spec and arg not in kwargs
-        ]
-        if missing:
-            raise TypeError(
-                f"input '{self.name}' missing required argument(s): {', '.join(missing)}"
-            )
+        """Validate required args (clear ``TypeError`` if missing), then read."""
+        self._check_required(kwargs)
         return self.read(**kwargs)

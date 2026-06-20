@@ -23,6 +23,7 @@ from __future__ import annotations
 
 from typing import Any
 
+from .._core import required_args
 from ..inputs import registry as inputs
 from ..primitives import registry as primitives
 
@@ -61,8 +62,6 @@ def _params_to_input_schema(parameters: dict[str, dict[str, Any]]) -> dict[str, 
     model sees the full intent of each argument.
     """
     properties: dict[str, Any] = {}
-    required: list[str] = []
-
     for arg, spec in parameters.items():
         spec = spec or {}
         prop: dict[str, Any] = {
@@ -74,11 +73,12 @@ def _params_to_input_schema(parameters: dict[str, dict[str, Any]]) -> dict[str, 
             # Surface the default so the model knows the arg is optional and what
             # value it falls back to.
             prop["default"] = spec["default"]
-        else:
-            required.append(arg)
         properties[arg] = prop
 
     schema: dict[str, Any] = {"type": "object", "properties": properties}
+    # "required" uses the one shared definition (no "default" key) — same rule the
+    # Capability base validates against, so the schema and the runtime check agree.
+    required = required_args(parameters)
     if required:
         schema["required"] = required
     return schema

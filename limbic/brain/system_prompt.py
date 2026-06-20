@@ -41,33 +41,21 @@ Hardware grasp rules (this gripper, learned the hard way):
   to release after lowering at the destination."""
 
 
-def _format_primitive_catalog(catalog: list[dict[str, Any]]) -> str:
-    """Render the primitive catalog as readable lines with parameters."""
-    if not catalog:
-        return "(no primitives are registered yet)"
-    lines: list[str] = []
-    for prim in catalog:
-        lines.append(f"- {prim['name']}: {prim.get('summary', '')}")
-        for arg, spec in (prim.get("parameters") or {}).items():
-            spec = spec or {}
-            required = "required" if "default" not in spec else f"default={spec['default']!r}"
-            lines.append(
-                f"    * {arg} ({spec.get('type', 'string')}, {required}): "
-                f"{spec.get('description', '')}"
-            )
-    return "\n".join(lines)
+def _format_catalog(
+    catalog: list[dict[str, Any]], empty_message: str, name_prefix: str = ""
+) -> str:
+    """Render a primitive/input catalog as readable lines with parameters.
 
-
-def _format_input_catalog(catalog: list[dict[str, Any]]) -> str:
-    """Render the sensory-input catalog, noting the ``sense_`` tool prefix."""
+    Shared by both catalogs; ``name_prefix`` is "" for primitives and "sense_"
+    for inputs (the tool name the model calls). ``empty_message`` is shown when
+    nothing is registered.
+    """
     if not catalog:
-        return "(no senses are registered yet — plan without perception)"
+        return empty_message
     lines: list[str] = []
-    for sense in catalog:
-        lines.append(
-            f"- sense_{sense['name']}: {sense.get('summary', '')}"
-        )
-        for arg, spec in (sense.get("parameters") or {}).items():
+    for item in catalog:
+        lines.append(f"- {name_prefix}{item['name']}: {item.get('summary', '')}")
+        for arg, spec in (item.get("parameters") or {}).items():
             spec = spec or {}
             required = "required" if "default" not in spec else f"default={spec['default']!r}"
             lines.append(
@@ -79,8 +67,14 @@ def _format_input_catalog(catalog: list[dict[str, Any]]) -> str:
 
 def build_system_prompt() -> str:
     """Build the full planner system prompt from the live catalogs."""
-    primitive_catalog = _format_primitive_catalog(primitives.catalog())
-    input_catalog = _format_input_catalog(inputs.catalog())
+    primitive_catalog = _format_catalog(
+        primitives.catalog(), empty_message="(no primitives are registered yet)"
+    )
+    input_catalog = _format_catalog(
+        inputs.catalog(),
+        empty_message="(no senses are registered yet — plan without perception)",
+        name_prefix="sense_",
+    )
 
     return f"""\
 You are the planning mind of `limbic`, a tabletop robot arm. Your job is to turn \
