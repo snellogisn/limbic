@@ -183,7 +183,9 @@ def start_run(
     control, inputs, or brain layers) writes into this run until :func:`end_run`.
     """
     global _CURRENT
-    stamp = datetime.now().strftime("%Y%m%d-%H%M%S")
+    # Millisecond resolution so runs in the same second get unique, correctly
+    # ordered folder names (second-resolution stamps collide and sort wrong).
+    stamp = datetime.now().strftime("%Y%m%d-%H%M%S-%f")[:-3]
     folder = f"{stamp}-{_slug(label or 'run')}"
     meta = {
         "label": label or "run",
