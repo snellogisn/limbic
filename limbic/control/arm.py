@@ -37,11 +37,16 @@ from .kinematics import forward_kinematics, solve_ik
 from .safety import (
     ARM_JOINTS,
     GRIPPER_JOINT,
+    JOINT_SOFT_LIMITS,
     clamp_joint,
     clamp_to_workspace,
 )
 
+# "Home" = every motor at the CENTRE of its range. The arm joints' soft limits
+# are symmetric, so their midpoint is 0 deg; the gripper's midpoint is its
+# halfway opening. go_home() drives all of them there.
 HOME_POSE: dict[str, float] = {j: 0.0 for j in ARM_JOINTS}
+_GRIPPER_HOME: float = sum(JOINT_SOFT_LIMITS[GRIPPER_JOINT]) / 2.0
 
 
 class RobotArm:
@@ -182,8 +187,14 @@ class RobotArm:
         return joints
 
     def go_home(self) -> dict[str, float]:
-        """Return to the centred home pose."""
+        """Move every motor to the centre of its range (the neutral home pose).
+
+        Home = all arm joints at 0 deg (their soft-limit midpoint) AND the
+        gripper at its halfway opening — every motor centred. The arm is moved
+        first, then the gripper is actuated in isolation (§0.6 gripper rule).
+        """
         self._drive_to(HOME_POSE)
+        self._set_gripper(_GRIPPER_HOME)
         joints = self.read_joints()
         self._runlog().movement(
             "go_home", achieved_joints={k: round(v, 2) for k, v in joints.items()}
