@@ -1,21 +1,17 @@
-"""SO-101 kinematics built on the ikpy chain (Part A, §A.2).
+"""SO-101 forward kinematics + geometry, built on the ikpy chain (Part A, §A.2).
 
-Two cooperating pieces, both derived from the SAME source of truth — the ikpy
-chain parsed from the SO-101 URDF — so they can never drift apart:
+``build_chain()`` / ``fk()`` — forward kinematics via ikpy (pure Python, runs on
+any arch). This is the trusted FK reference: the rest of the bridge (the
+table<->ikpy frame conversion and FK read-back in ``kinematics``) is built on it.
 
-  * ``build_chain()`` / ``fk()`` — forward kinematics + geometry via ikpy. ikpy
-    is pure Python and runs on any arch. This is the trusted FK reference.
+``geometry()`` extracts the planar link lengths / rest angles / pan axis ONCE
+from this FK chain — nothing is hardcoded — so anything derived from it stays
+consistent with FK by construction.
 
-  * ``solve_reach()`` — a DETERMINISTIC closed-form planar reaching solver. We do
-    NOT use ikpy's numerical ``inverse_kinematics`` for reaching: it branch-jumps
-    (non-deterministically hops elbow-up/elbow-down between calls). Instead we
-    reduce the arm to ``shoulder_pan`` (azimuth) + a planar RRR in the pan-frame
-    vertical plane and solve it analytically, picking a single fixed elbow branch.
-
-All geometry constants (link lengths, rest angles, pan sign, the pitch mapping)
-are EXTRACTED ONCE from the ikpy FK chain at import — nothing is hardcoded — so
-this stays consistent with FK by construction. We validate the two against each
-other in scripts/stage1_ik_check.py.
+Reaching IK is NOT here: it lives in ``_prep_planar_ik.PlanarSO101IK``, the
+hardware-validated deterministic closed-form planar solver, wired up in
+``kinematics.solve_ik``. (ikpy's own numerical ``inverse_kinematics`` is avoided
+for reaching because it branch-jumps non-deterministically.)
 
 FRAMES & UNITS in THIS module:
   * Everything here is in the ikpy/URDF frame and the URDF joint convention
@@ -170,117 +166,7 @@ def geometry() -> PlanarGeometry:
     )
 
 
-# --------------------------------------------------------------------------- #
-# Joint limits (from the URDF, via the ikpy chain)
-# --------------------------------------------------------------------------- #
-@lru_cache(maxsize=1)
-def joint_limits() -> dict[str, tuple[float, float]]:
-    """{joint: (lo, hi)} in radians, read from the URDF joint limits."""
-    chain = build_chain()
-    out: dict[str, tuple[float, float]] = {}
-    for link, active in zip(chain.links, _ACTIVE_MASK):
-        if active:
-            lo, hi = link.bounds
-            out[link.name] = (
-                -math.pi if lo is None or not math.isfinite(lo) else lo,
-                math.pi if hi is None or not math.isfinite(hi) else hi,
-            )
-    return out
-
-
-def _wrap(a: float) -> float:
-    """Wrap an angle to (-pi, pi]."""
-    return (a + math.pi) % (2 * math.pi) - math.pi
-
-
-def in_limits(joints: dict[str, float], tol: float = 1e-6) -> bool:
-    lim = joint_limits()
-    return all(lim[j][0] - tol <= joints[j] <= lim[j][1] + tol for j in lim)
-
-
-# --------------------------------------------------------------------------- #
-# Closed-form reaching solver
-# --------------------------------------------------------------------------- #
-@dataclass(frozen=True)
-class ReachSolution:
-    joints: dict[str, float]  # {joint: radians} for the 5 active joints
-    reachable: bool           # False => target clamped to nearest feasible point
-    in_limits: bool           # False => no joint-limit-respecting pose exists
-
-
-def solve_reach(
-    x: float,
-    y: float,
-    z: float,
-    pitch: float = -math.pi / 2,
-    wrist_roll: float = 0.0,
-    current: dict[str, float] | None = None,
-) -> ReachSolution:
-    """Closed-form IK: tip at (x, y, z) m (ikpy base frame) with approach ``pitch``.
-
-    ``pitch`` is the in-plane elevation of the gripper APPROACH axis — the
-    direction of the wrist_flex->tip (fingertip) link: ``-pi/2`` = straight down
-    for a top-down grasp, ``0`` = horizontal forward.
-
-    Deterministic. Of the two elbow branches it keeps those within the URDF joint
-    limits and, per the build guide, prefers elbow-up; if ``current`` is given it
-    instead prefers the least-motion branch (continuity). Out-of-reach targets
-    clamp to the nearest feasible planar point (``reachable=False``).
-    """
-    g = geometry()
-    px, py = g.pan_axis_xy
-
-    # --- shoulder_pan: aim the planar slice at the target's azimuth -----------
-    azimuth = math.atan2(y - py, x - px)
-    pan = _wrap(azimuth / g.pan_gain)
-    xt = math.hypot(x - px, y - py)  # horizontal distance from the pan axis
-
-    # --- pitch is the wrist_flex->tip link direction; back off to the wrist ----
-    xw = xt - g.L3 * math.cos(pitch)
-    zw = z - g.L3 * math.sin(pitch)
-
-    # --- planar 2-link (L1, L2) from the lift axis to the wrist center ---------
-    dx = xw - g.x0
-    dz = zw - g.z0
-    d = math.hypot(dx, dz)
-    reachable = g.reach_min <= d <= g.reach_max
-    if not reachable and d > 0:
-        d = min(max(d, g.reach_min + 1e-9), g.reach_max - 1e-9)
-        xw = g.x0 + dx * d / math.hypot(dx, dz)
-        zw = g.z0 + dz * d / math.hypot(dx, dz)
-        dx, dz = xw - g.x0, zw - g.z0
-
-    base_angle = math.atan2(dz, dx)
-    cos_in = (g.L1 * g.L1 + d * d - g.L2 * g.L2) / (2 * g.L1 * d)
-    cos_in = max(-1.0, min(1.0, cos_in))
-    interior = math.acos(cos_in)
-
-    # Both elbow branches; recover ikpy joint angles for each.
-    candidates: list[tuple[dict[str, float], float]] = []  # (joints, elbow_z)
-    for sign in (+1.0, -1.0):
-        phi1 = base_angle + sign * interior
-        ex = g.x0 + g.L1 * math.cos(phi1)
-        ez = g.z0 + g.L1 * math.sin(phi1)
-        phi2 = math.atan2(zw - ez, xw - ex)
-        s = _wrap(g.a1 - phi1)
-        e = _wrap(g.a2 - (g.a1 - phi1) - phi2)
-        w = _wrap((g.a3 - pitch) - (g.a1 - phi1) - (g.a2 - (g.a1 - phi1) - phi2))
-        joints = {
-            "shoulder_pan": pan,
-            "shoulder_lift": s,
-            "elbow_flex": e,
-            "wrist_flex": w,
-            "wrist_roll": wrist_roll,
-        }
-        candidates.append((joints, ez))
-
-    valid = [(j, ez) for j, ez in candidates if in_limits(j)]
-    pool = valid if valid else candidates
-    if current is not None:
-        keys = ("shoulder_lift", "elbow_flex", "wrist_flex")
-        chosen = min(pool, key=lambda c: max(abs(c[0][k] - current[k]) for k in keys))[0]
-    else:
-        # prefer elbow-up: the branch whose elbow sits higher (larger elbow z).
-        chosen = max(pool, key=lambda c: c[1])[0]
-
-    return ReachSolution(joints=chosen, reachable=reachable, in_limits=bool(valid))
+# NOTE: reaching IK lives in ``_prep_planar_ik.PlanarSO101IK`` (the
+# hardware-validated closed-form solver), wired up in ``kinematics.solve_ik``.
+# This module now only provides FK + extracted geometry (the trusted FK
+# reference the rest of the bridge is built on).
