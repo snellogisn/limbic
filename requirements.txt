@@ -1,0 +1,25 @@
+# limbic dependencies.
+#
+# The CORE stack (control layer, kinematics, primitives, inputs registry, the
+# mock backend) is PURE PYTHON and needs nothing here — it imports and runs on a
+# bare macOS / Windows / Linux machine. Everything below is optional and only
+# needed for specific capabilities.
+
+# --- Serial port auto-detection (replaces the hard-coded COM7) ---------------
+# Needed to find/drive the real arm's USB port on any OS. Not needed for the mock.
+pyserial>=3.5
+
+# --- Cameras (the inputs/camera sense) ---------------------------------------
+# Cross-platform capture (AVFoundation on macOS, DirectShow on Windows, V4L2 on
+# Linux) is selected automatically in platform_support.py. Not needed for the mock.
+opencv-python>=4.8
+
+# --- The LLM brain -----------------------------------------------------------
+# Only needed to run the runtime Claude orchestrator (brain/). Plans can also be
+# authored by Claude Code and run directly via the sequence runner with no SDK.
+anthropic>=0.40
+
+# --- The real robot arm ------------------------------------------------------
+# Only needed for the RealBackend (driving physical SO-101 hardware). Install
+# with the feetech extra:  pip install "lerobot[feetech]"
+# lerobot[feetech]

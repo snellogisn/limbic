@@ -1,0 +1,23 @@
+[build-system]
+requires = ["setuptools>=61"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "limbic"
+version = "0.1.0"
+description = "Cross-platform, LLM-driven control stack for a tabletop robot arm."
+readme = "README.md"
+requires-python = ">=3.10"
+# The core stack is pure-Python with zero required dependencies (it runs on the
+# mock backend out of the box). Optional features live in [project.optional-dependencies].
+dependencies = []
+
+[project.optional-dependencies]
+serial = ["pyserial>=3.5"]       # real-arm USB serial port detection
+camera = ["opencv-python>=4.8"]  # the camera sense
+brain = ["anthropic>=0.40"]      # the runtime LLM orchestrator
+# Physical SO-101 hardware: install separately with `pip install "lerobot[feetech]"`.
+all = ["pyserial>=3.5", "opencv-python>=4.8", "anthropic>=0.40"]
+
+[tool.setuptools.packages.find]
+include = ["limbic*"]

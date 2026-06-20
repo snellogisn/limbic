@@ -1,0 +1,28 @@
+# Python
+__pycache__/
+*.py[cod]
+*.egg-info/
+.eggs/
+build/
+dist/
+
+# Virtual environments
+.venv/
+venv/
+env/
+
+# Local config / secrets (never commit your API key)
+.env
+
+# OS noise
+.DS_Store
+Thumbs.db
+
+# Camera/calibration artefacts written at runtime
+*.png
+!checkerboard_*.png
+captures/
+calib/
+
+# Per-run logs (movements / data / thinking). Keep these local by default.
+logs/
