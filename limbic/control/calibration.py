@@ -213,7 +213,20 @@ APRILTAG_SIZE_MM = 57.5
 APRILTAG_RIGHT_XYZ_MM = (60.0, -145.0, 5.0)  # id 0
 APRILTAG_LEFT_XYZ_MM = (60.0, 145.0, 5.0)    # id 1
 
+# One registry both the localization loader and the extrinsics script read, so
+# role <-> camera name <-> tag never drift. Roles A/B match the .npz filename
+# suffix (intrinsics_CAM_A.npz, ...). side is the §8 camera-selection side.
+CAMERAS: dict[str, dict] = {
+    "A": {"name": CAM_RIGHT_NAME, "side": "RIGHT", "tag_id": 0, "tag_xyz_mm": APRILTAG_RIGHT_XYZ_MM},
+    "B": {"name": CAM_LEFT_NAME,  "side": "LEFT",  "tag_id": 1, "tag_xyz_mm": APRILTAG_LEFT_XYZ_MM},
+}
+
 
 def camera_for_y(y_mm: float) -> str:
     """Pick the camera on the side the target is closest to (§8 rule)."""
     return CAM_LEFT_NAME if y_mm > 0 else CAM_RIGHT_NAME
+
+
+def camera_role_for_y(y_mm: float) -> str:
+    """Role ('A'/'B') of the camera on the side the target is closest to (§8)."""
+    return "B" if y_mm > 0 else "A"
