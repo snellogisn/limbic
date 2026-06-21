@@ -31,6 +31,7 @@ from __future__ import annotations
 
 import json
 import re
+import uuid
 from typing import Any, Callable
 
 from .. import runlog
@@ -199,6 +200,91 @@ def _dispatch_tool(block: Any, trail, verbose: bool) -> tuple[dict[str, Any], di
     return result({"error": f"unknown tool {name}"}, is_error=True), None
 
 
+# How many characters of new reasoning/text to accumulate before flushing a live
+# chunk to the thinking log. Small enough that the website feels like it's watching
+# the model think in real time; large enough not to spam the log with one record
+# per token.
+_LIVE_FLUSH_CHARS = 48
+
+
+def _emit_whole_blocks(resp: Any, trail) -> None:
+    """Fallback emitter: log each finished thinking/text block in one shot.
+
+    Used when the client can't stream (e.g. an injected mock client in offline
+    runs) — the reasoning still reaches the thinking log, just not incrementally.
+    """
+    for block in resp.content:
+        kind = getattr(block, "type", None)
+        if kind == "thinking" and getattr(block, "thinking", ""):
+            trail.thought("reasoning", block.thinking)
+        elif kind == "text" and getattr(block, "text", ""):
+            trail.thought("message", block.text)
+
+
+def _stream_response(client, create_kwargs, messages, trail):
+    """Run one planning call, streaming the model's reasoning to the live feed.
+
+    As Claude generates, its **thinking** and **assistant text** arrive as deltas;
+    we accumulate them and flush a thought record every ``_LIVE_FLUSH_CHARS`` (and
+    at each block's end), tagged with a per-block ``stream_id`` so the website can
+    coalesce the deltas into one growing, "typing" bubble — the user watches the
+    decision form instead of waiting for the whole turn. Returns the final
+    ``Message`` (identical shape to ``messages.create``), so the rest of the
+    planning loop — tool-use extraction, the thinking signatures in the assistant
+    turn — is unchanged.
+
+    Degrades gracefully: a client without ``messages.stream`` (a test/offline mock)
+    falls back to a single non-streaming call + :func:`_emit_whole_blocks`.
+    """
+    stream_ctx = getattr(getattr(client, "messages", None), "stream", None)
+    if stream_ctx is None:
+        resp = client.messages.create(messages=messages, **create_kwargs)
+        _emit_whole_blocks(resp, trail)
+        return resp
+
+    state = {"id": None, "phase": None, "buf": "", "pending": 0}
+
+    def flush(partial: bool) -> None:
+        if state["buf"]:
+            # message carries only the NEW text since the last flush (a delta); the
+            # website appends deltas sharing a stream_id. partial=False marks the
+            # block complete (so the UI can drop its typing caret).
+            trail.thought(state["phase"], state["buf"], stream_id=state["id"], partial=partial)
+            state["buf"] = ""
+            state["pending"] = 0
+
+    with stream_ctx(messages=messages, **create_kwargs) as stream:
+        for event in stream:
+            etype = getattr(event, "type", None)
+            if etype == "content_block_start":
+                block = getattr(event, "content_block", None)
+                btype = getattr(block, "type", None)
+                if btype in ("thinking", "text"):
+                    state["id"] = uuid.uuid4().hex[:8]
+                    state["phase"] = "reasoning" if btype == "thinking" else "message"
+                    state["buf"] = ""
+                    state["pending"] = 0
+                else:
+                    state["phase"] = None  # tool_use etc. — not narrated live
+            elif etype == "content_block_delta" and state["phase"]:
+                delta = getattr(event, "delta", None)
+                dtype = getattr(delta, "type", None)
+                piece = ""
+                if dtype == "thinking_delta":
+                    piece = getattr(delta, "thinking", "") or ""
+                elif dtype == "text_delta":
+                    piece = getattr(delta, "text", "") or ""
+                if piece:
+                    state["buf"] += piece
+                    state["pending"] += len(piece)
+                    if state["pending"] >= _LIVE_FLUSH_CHARS:
+                        flush(partial=True)
+            elif etype == "content_block_stop" and state["phase"]:
+                flush(partial=False)
+                state["phase"] = None
+        return stream.get_final_message()
+
+
 def _plan_turn(client, model, tools, system, messages, trail, verbose) -> dict | None:
     """Drive Claude until it commits a valid plan (or gives up). Mutates ``messages``.
 
@@ -214,19 +300,13 @@ def _plan_turn(client, model, tools, system, messages, trail, verbose) -> dict |
         create_kwargs["thinking"] = {"type": "adaptive"}
 
     for _ in range(_MAX_PLAN_TURNS):
-        resp = client.messages.create(messages=messages, **create_kwargs)
+        # Stream the call so the model's reasoning reaches the live feed AS it's
+        # produced (deltas), not in one chunk after the turn finishes.
+        resp = _stream_response(client, create_kwargs, messages, trail)
 
         if resp.stop_reason == "refusal":
             trail.thought("refused", message="model declined to plan this instruction")
             raise RuntimeError("the model refused to plan this instruction; rephrase and retry")
-
-        # Capture any visible reasoning/narration for the thinking log.
-        for block in resp.content:
-            kind = getattr(block, "type", None)
-            if kind == "thinking" and getattr(block, "thinking", ""):
-                trail.thought("reasoning", block.thinking)
-            elif kind == "text" and getattr(block, "text", ""):
-                trail.thought("message", block.text)
 
         tool_uses = [b for b in resp.content if getattr(b, "type", None) == "tool_use"]
         if not tool_uses:

@@ -70,6 +70,35 @@ function eventHtml(ev) {
     `<span class="${bodyCls}"><span class="t-label">${esc(style.label)}</span> ${esc(msg)}</span></div>`;
 }
 
+// Append one live event to the feed. Streamed reasoning/text arrives as deltas
+// sharing a `stream_id`: the first delta creates a "typing" bubble, each later one
+// appends into it (so the user watches the thought form), and `partial:false`
+// finalises it (caret removed). Everything else renders as a single line.
+function appendEvent(log, ev) {
+  const sid = ev.stream_id;
+  if (sid && ev.channel !== "movements") {
+    let el = log.querySelector(`.thought[data-stream="${sid}"]`);
+    if (!el) {
+      const style = THOUGHT_STYLE[ev.phase] || { icon: "💭", label: ev.phase || "" };
+      log.insertAdjacentHTML("beforeend",
+        `<div class="thought streaming" data-stream="${esc(sid)}">` +
+        `<span class="t-icon">${style.icon}</span>` +
+        `<span class="t-body t-block"><span class="t-label">${esc(style.label)}</span> ` +
+        `<span class="t-text"></span><span class="t-caret"></span></span></div>`);
+      el = log.querySelector(`.thought[data-stream="${sid}"]`);
+    }
+    const textEl = el.querySelector(".t-text");
+    if (textEl) textEl.textContent += (ev.message || "");
+    if (ev.partial === false) {
+      el.classList.remove("streaming");
+      const caret = el.querySelector(".t-caret");
+      if (caret) caret.remove();
+    }
+    return;
+  }
+  log.insertAdjacentHTML("beforeend", eventHtml(ev));
+}
+
 // ----- Ask page -------------------------------------------------------------
 function initAskPage() {
   const taskEl = document.getElementById("task");
@@ -104,7 +133,7 @@ function initAskPage() {
         continue;
       }
       for (const ev of (data.events || [])) {
-        thinkLog.insertAdjacentHTML("beforeend", eventHtml(ev));
+        appendEvent(thinkLog, ev);
       }
       if (data.events && data.events.length) {
         since = data.last_seq;

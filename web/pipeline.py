@@ -216,16 +216,44 @@ def _offline_plan(task: str) -> tuple[list[dict[str, Any]], str]:
     )
 
 
+def _collapse_thinking(records: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    """Merge live-streamed thought deltas back into one record per reasoning block.
+
+    The brain streams its reasoning to the live feed as many small delta records
+    that share a ``stream_id`` (see orchestrator._stream_response). For the logs
+    page and the thought count we want the WHOLE thought, so consecutive records
+    with the same ``stream_id`` are concatenated into a single clean record (the
+    ``stream_id`` / ``partial`` bookkeeping dropped). Records without a
+    ``stream_id`` (one-shot thoughts) pass through untouched, order preserved.
+    """
+    out: list[dict[str, Any]] = []
+    by_id: dict[str, dict[str, Any]] = {}
+    for rec in records:
+        sid = rec.get("stream_id")
+        if not sid:
+            out.append(rec)
+            continue
+        if sid in by_id:
+            by_id[sid]["message"] = (by_id[sid].get("message", "") or "") + (rec.get("message", "") or "")
+        else:
+            merged = {k: v for k, v in rec.items() if k not in ("stream_id", "partial")}
+            by_id[sid] = merged
+            out.append(merged)  # same reference kept in by_id, so appends update it
+    return out
+
+
 def _count_streams(run_dir: Path) -> dict[str, int]:
     """Count records in each log stream of a finished run."""
     counts = {}
     for channel, filename in (
         ("movements", "movements.jsonl"),
         ("data", "data.jsonl"),
-        ("thinking", "thinking.jsonl"),
     ):
         path = run_dir / filename
         counts[channel] = sum(1 for _ in path.open()) if path.exists() else 0
+    # Thinking is counted AFTER collapsing streamed deltas, so "N thoughts" reflects
+    # real reasoning blocks, not the live-streaming chunk count.
+    counts["thinking"] = len(_collapse_thinking(_read_jsonl(run_dir / "thinking.jsonl")))
     return counts
 
 
@@ -502,5 +530,5 @@ def get_run(run_id: str) -> dict[str, Any] | None:
         "meta": _read_json(run_dir / "run.json"),
         "movements": _read_jsonl(run_dir / "movements.jsonl"),
         "data": _read_jsonl(run_dir / "data.jsonl"),
-        "thinking": _read_jsonl(run_dir / "thinking.jsonl"),
+        "thinking": _collapse_thinking(_read_jsonl(run_dir / "thinking.jsonl")),
     }
