@@ -529,8 +529,12 @@ def plan_and_run(
                     f"Suggestions: {verdict.get('suggestions') or '(none)'}. "
                     f"Execution error: {exec_error or 'none'}. "
                     f"Current sensor snapshot: {json.dumps(snapshot, default=str)}. "
-                    "Revise your approach and submit a new plan. If a needed capability "
-                    "is missing, create_primitive (or edit_primitive) first, then submit_plan."
+                    "If an object may have MOVED since you last detected it (e.g. after "
+                    "a push, a knock, or a failed grasp), call sense_object_detections "
+                    "again to read its CURRENT position before planning — do not reuse a "
+                    "stale coordinate. Revise your approach and submit a new plan. If a "
+                    "needed capability is missing, create_primitive (or edit_primitive) "
+                    "first, then submit_plan."
                 )})
 
         summary = {"ok": status == "completed", "status": status, "attempts": len(attempts)}
