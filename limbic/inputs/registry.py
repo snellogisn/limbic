@@ -57,6 +57,33 @@ def catalog() -> list[dict[str, Any]]:
     return _registry.catalog()
 
 
+def snapshot(only: list[str] | None = None) -> dict[str, Any]:
+    """Read every available sense at once — a single perception "snapshot".
+
+    Returns ``{sense_name: reading_or_error}`` for all registered senses (or just
+    those named in ``only``). This is what the brain's verify/retry step analyses
+    to decide whether a task succeeded, and what to change if it didn't.
+
+    It is also the integration seam for **live inputs** (e.g. a streaming YOLO
+    object detector): once such a sense is dropped into ``inputs/library/``, it is
+    auto-discovered and automatically included in every snapshot — no change here
+    or in the brain is needed. Senses that error are reported as
+    ``{"error": ...}`` rather than failing the whole snapshot.
+    """
+    available = all_inputs()  # triggers discovery; keys are the registered senses
+    names = only if only is not None else list(available)
+    out: dict[str, Any] = {}
+    for name in names:
+        if name not in available:
+            out[name] = {"error": f"no such sense '{name}'"}
+            continue
+        try:
+            out[name] = read(name)
+        except Exception as exc:  # one bad sense must not sink the snapshot
+            out[name] = {"error": f"{type(exc).__name__}: {exc}"}
+    return out
+
+
 def read(name: str, **kwargs: Any) -> Any:
     """Query input ``name``, injecting any runtime context its ``read`` accepts.
 

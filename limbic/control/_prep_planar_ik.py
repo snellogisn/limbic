@@ -19,6 +19,8 @@ Geometry (link lengths, frame offsets, angle constants) is extracted once from t
 validated FK chain so it stays consistent with everything measured.
 """
 
+from __future__ import annotations
+
 import numpy as np
 
 from ._prep_ik_wrapper import (
