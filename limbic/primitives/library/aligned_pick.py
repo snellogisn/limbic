@@ -64,8 +64,8 @@ class AlignedPick(Primitive):
         },
         "claw_y_offset_mm": {
             "type": "number",
-            "description": "Lateral tip offset for the claw pulling to one side as it closes (mm in y). Default -10.",
-            "default": -10.0,
+            "description": "Lateral tip offset for the claw pulling to one side as it closes (mm in y). Default -5.",
+            "default": -5.0,
         },
         "min_grasp_z_mm": {
             "type": "number",
@@ -93,7 +93,7 @@ class AlignedPick(Primitive):
         object_height_mm: float = 25.0,
         hover_z_mm: float = 60.0,
         grasp_depth_mm: float = 7.5,
-        claw_y_offset_mm: float = -10.0,
+        claw_y_offset_mm: float = -5.0,
         min_grasp_z_mm: float = 3.0,
         max_align_iters: int = 3,
         align_tolerance_mm: float = 4.0,
