@@ -38,8 +38,9 @@ Hardware grasp + motion rules (this arm, learned the hard way — follow them):
 - Slow for contact: descending to grasp, lowering to place, and pushing are slow,
   controlled moves — use descend_to / pick / place (which use the precision
   profile), not a fast transit, for anything that touches an object or the table.
-- Claw offset: the gripper closes slightly off-centre, so aim a few millimetres
-  to one side of the object's reported centre rather than dead-on.
+- Claw aim: the gripper closes ON CENTRE on this rig, so aim the grasp dead-on at
+  the object's reported centre — no lateral offset (the pick/place defaults reflect
+  this; don't add a side bias).
 - Descend INTO the object: lower to a grasp height at or slightly below the top of
   the object so the fingers close around it, not above it.
 - Object height is FIXED, not sensed: blocks/cubes on this table are ~25 mm tall,
