@@ -56,9 +56,9 @@ class Pick(Primitive):
         "grasp_depth_mm": {
             "type": "number",
             "description": "How far BELOW the object top to drive the tip so the "
-            "fingers straddle it (mm). Reach 10-15 mm INTO the object to grab it "
-            "properly. Default 13.",
-            "default": 13.0,
+            "fingers straddle it (mm). Reach ~7.5 mm (0.75 cm) INTO the object; try "
+            "not to go deeper. Default 7.5.",
+            "default": 7.5,
         },
         "claw_y_offset_mm": {
             "type": "number",
@@ -80,7 +80,7 @@ class Pick(Primitive):
         y_mm: float,
         object_height_mm: float = 25.0,
         hover_z_mm: float = 60.0,
-        grasp_depth_mm: float = 13.0,
+        grasp_depth_mm: float = 7.5,
         claw_y_offset_mm: float = -10.0,
         min_grasp_z_mm: float = 3.0,
         **kwargs: Any,
