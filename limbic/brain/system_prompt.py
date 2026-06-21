@@ -62,11 +62,24 @@ Hardware grasp + motion rules (this arm, learned the hard way — follow them):
   bare table → ~2.5 cm. Use `place` with `support_height_mm` set and it computes the
   release height for you. Better to drop from slightly too high than to ram the lower
   object.
-- Prefer TOP-DOWN picks: grasp straight down (gripper pointing down — wrist TILT at
-  or near 90 deg, i.e. vertical) — that is the most accurate and is the default. Only
-  let the wrist TILT away from vertical at FAR reach positions where a clean top-down
-  genuinely can't be reached; keep precise grasps near the workspace centre and don't
-  tilt unless distance forces it.
+- TOP-DOWN (90 deg) IS THE PRIORITY for every pick AND place — default to the
+  STEEPEST possible claw angle. WHY THIS MATTERS: the claw lands DEAD-CENTRE on the
+  object only when the wrist is vertical (90 deg tilt / pitch -90). The instant it
+  tilts off vertical the claw sits off-centre, so the grasp or placement consistently
+  MISSES — a tilted grasp only succeeds by luck. Rules, in priority order:
+    1. If an object CAN be reached with a vertical (90 deg) approach, it ABSOLUTELY
+       must be grasped/placed that way — never accept a tilt you could avoid. A
+       vertical approach is reachable in the inner band near the workspace centre;
+       the arm tilts more the farther out it reaches.
+    2. If a target sits too far out for a vertical approach, do NOT grasp it tilted
+       where it lies — FIRST reposition it into the top-down band with
+       reposition_for_pick, re-detect its new position (act-then-see), then grasp it
+       vertically there (see the reposition rule below).
+    3. ONLY when an object genuinely CANNOT be brought into the top-down band do you
+       grasp it tilted — and then keep the tilt as STEEP (as close to vertical) as
+       possible, prioritising the steepest reachable approach over exact position or
+       anything else. This last-resort tilted grasp is for IMPOSSIBLE-to-top-down
+       objects only.
 - Use the arm's full reach: it can tilt/extend to reach far targets — prefer a
   reachable plan over declaring a target impossible, but keep precise top-down
   grasps near the workspace centre where IK is strongest.
