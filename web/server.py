@@ -171,7 +171,26 @@ def main() -> int:
         print("[web]   will NOT move. Set the key and restart for full Claude planning:")
         print("[web]     PowerShell:  $env:ANTHROPIC_API_KEY = 'sk-ant-...'")
         print("[web] " + "!" * 64)
-    print(f"[web] arm backend: {backend} (set LIMBIC_BACKEND=real / LIMBIC_PORT=COM7 to force the real arm)")
+    print(f"[web] arm backend: {backend} (set LIMBIC_BACKEND=real / LIMBIC_PORT=COM5 to force the real arm)")
+
+    # Show the serial port we actually resolved, so "arm not detected" is diagnosable
+    # at a glance: is it the port we expected, and does Python even see it?
+    try:
+        from limbic.platform_support import detect_serial_port, list_serial_ports
+
+        port = detect_serial_port()
+        if port:
+            print(f"[web] arm serial port: {port} (LIMBIC_PORT={os.environ.get('LIMBIC_PORT', '<auto>')})")
+        else:
+            seen = ", ".join(p.device for p in list_serial_ports()) or "none"
+            print("[web] " + "!" * 64)
+            print("[web] WARNING: no arm serial port resolved -> the arm will NOT move.")
+            print(f"[web]   Ports Python can see: {seen}")
+            print("[web]   Fix: set the port explicitly, e.g.  $env:LIMBIC_PORT = 'COM5'")
+            print("[web]   (If the list is empty, install pyserial:  pip install pyserial)")
+            print("[web] " + "!" * 64)
+    except Exception as exc:  # never let a diagnostics print stop the server
+        print(f"[web] (could not probe serial ports: {exc})")
 
     server = ThreadingHTTPServer((args.host, args.port), Handler)
     url = f"http://{'localhost' if args.host == '127.0.0.1' else args.host}:{args.port}"

@@ -37,6 +37,11 @@ _REPO_ROOT = Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(_REPO_ROOT))
 os.environ.setdefault("LIMBIC_LOG_DIR", str(_REPO_ROOT / "logs"))
 
+# Default serial port the website looks for the arm on (the demo box's COM port).
+# setdefault, so an explicit LIMBIC_PORT in the environment still wins; and on a
+# machine with no such port (or no lerobot) the auto backend falls back to mock.
+os.environ.setdefault("LIMBIC_PORT", "COM5")
+
 # Motion timing for web-driven runs is set HERE, before limbic imports (config.py
 # reads these env vars once at import). Safety rule: the website must NEVER drive
 # the physical arm at speed. So only an explicit mock backend runs fast (for a

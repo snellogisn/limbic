@@ -65,7 +65,7 @@ pip install "torch>=2.0" transformers              # Grounding DINO detector
 ```powershell
 $env:ANTHROPIC_API_KEY = 'sk-ant-...'   # inline ONLY — never write the key to a file
 $env:LIMBIC_BACKEND = 'real'            # drive the physical arm
-$env:LIMBIC_PORT = 'COM_'               # the COM port on THIS machine (Device Manager > Ports)
+$env:LIMBIC_PORT = 'COM5'               # the COM port on THIS machine (Device Manager > Ports)
 python web\server.py                     # then open http://localhost:8765
 ```
 
