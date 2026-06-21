@@ -19,6 +19,8 @@ but not yet consumed by any primitive.
 from __future__ import annotations
 
 import math
+import os
+import pathlib
 from bisect import bisect_left
 
 from .ik_chain import ACTIVE_JOINTS, geometry
@@ -140,13 +142,55 @@ def _z_blend(pitch_deg: float) -> float:
     return (pitch_deg - _PITCH_NONE_DEG) / (_PITCH_FULL_DEG - _PITCH_NONE_DEG)
 
 
+# --------------------------------------------------------------------------- #
+# Fitted accuracy model (data-driven; see accuracy_model.py + calibrate_accuracy).
+# If a fitted model file exists it SUPERSEDES the affine constants below; if not
+# (or it fails to load) we fall back to them. Re-fit with calibrate_accuracy.py,
+# then call reload_accuracy_model() (or restart) to pick it up.
+# --------------------------------------------------------------------------- #
+_ACCURACY_MODEL = None
+_ACCURACY_MODEL_LOADED = False
+
+
+def _accuracy_model_path() -> pathlib.Path:
+    override = os.environ.get("LIMBIC_ACCURACY_MODEL")
+    if override:
+        return pathlib.Path(override)
+    return pathlib.Path(__file__).resolve().parents[2] / "calibration" / "accuracy_model.json"
+
+
+def _get_accuracy_model():
+    global _ACCURACY_MODEL, _ACCURACY_MODEL_LOADED
+    if not _ACCURACY_MODEL_LOADED:
+        _ACCURACY_MODEL_LOADED = True
+        try:
+            from .accuracy_model import AccuracyModel
+
+            _ACCURACY_MODEL = AccuracyModel.load(_accuracy_model_path())
+        except Exception:
+            _ACCURACY_MODEL = None
+    return _ACCURACY_MODEL
+
+
+def reload_accuracy_model():
+    """Force a re-load of the fitted model (call after re-fitting)."""
+    global _ACCURACY_MODEL_LOADED
+    _ACCURACY_MODEL_LOADED = False
+    return _get_accuracy_model()
+
+
 def command_for_real(real_fwd_mm: float, real_z_mm: float, pitch_deg: float = -90.0) -> tuple[float, float]:
     """(aim_fwd, aim_z) to feed the IK so the tip lands at REAL (real_fwd, real_z).
 
-    This is the one to call when driving the arm. The droop correction is full
-    with the gripper vertical and fades to identity (aim = real) as the approach
-    tilts toward horizontal (no off-vertical data, so identity is the default).
+    This is the one to call when driving the arm. Uses the fitted accuracy model
+    if one is present, else the affine constants below. The droop correction is
+    full with the gripper vertical and fades to identity (aim = real) as the
+    approach tilts toward horizontal (no off-vertical data, so identity default).
     """
+    model = _get_accuracy_model()
+    if model is not None:
+        return model.command_for_real(real_fwd_mm, real_z_mm, pitch_deg)
+
     f = _z_blend(pitch_deg)
     af0, af1, af2 = _AIM_FWD_COEF
     az0, az1, az2 = _AIM_Z_COEF
@@ -163,6 +207,10 @@ def real_for_command(aim_fwd_mm: float, aim_z_mm: float, pitch_deg: float = -90.
     DIAGNOSTIC / PREDICTION ONLY -- never use this to drive the arm. Inverts the
     full-correction 2x2 affine (the pitch blend is ignored here; diagnostic).
     """
+    model = _get_accuracy_model()
+    if model is not None:
+        return model.real_for_command(aim_fwd_mm, aim_z_mm, pitch_deg)
+
     af0, af1, af2 = _AIM_FWD_COEF
     az0, az1, az2 = _AIM_Z_COEF
     det = af0 * az1 - af1 * az0
