@@ -78,9 +78,10 @@ def arm_to_ikpy_rad(arm_deg: dict[str, float]) -> dict[str, float]:
 # --------------------------------------------------------------------------- #
 # §5 -- empirical accuracy correction. The real tip lands SHORT and LOW of the
 # point the IK aims at (slack + gravity droop), so the correction aims FARTHER
-# and HIGHER. Re-fit 2026-06-20 from a move-to-point / ruler sweep on THIS rig
-# (the old reach-dropoff table over-corrected z at near reach and under-extended
-# reach -- it's gone, folded into the linear terms below).
+# and HIGHER. Re-fit 2026-06-20 from a move-to-point / ruler sweep on THIS rig,
+# then refined by a hardware ruler check at (160,0,60) [landed (165,0,84)] which
+# pinned down the z slope. The old reach-dropoff table over-corrected z at near
+# reach and under-extended reach -- it's gone, folded into the linear terms.
 #
 # Two functions, opposite directions -- be precise about which one is called:
 #   * command_for_real(real_fwd, real_z, pitch_deg) -- the one to CALL to
@@ -91,10 +92,11 @@ def arm_to_ikpy_rad(arm_deg: dict[str, float]) -> dict[str, float]:
 #
 # Model (table-frame mm, measured at pitch -90, planar reach + z; the planar
 # IK has ~0 model error, so "aim" = where the IK puts the model tip):
-#   aim_fwd = 0.9968*real_fwd - 0.0790*real_z + 49.156
-#   aim_z   = -0.7766*real_fwd + 1.0637*real_z + 178.558
-# i.e. extend reach ~+45-49mm, and add MORE up-correction at low reach / high z
-# (where droop is worst). Fit residual < 1mm on 4 near-centerline points.
+#   aim_fwd = 1.0729*real_fwd - 0.0394*real_z + 30.431
+#   aim_z   = -0.2221*real_fwd + 1.3511*real_z + 42.187
+# i.e. extend reach ~+45mm, and add MORE up-correction the higher z is. Fit
+# residual < 3mm on 4 near-centerline points (incl. the (160,0,60) ruler check);
+# round-trips to <1mm across the trust region.
 #
 # Pitch blend: the droop is full with the gripper vertical and fades to NONE
 # (aim = real) as it tilts toward horizontal -- we only have vertical data, so
@@ -102,14 +104,14 @@ def arm_to_ikpy_rad(arm_deg: dict[str, float]) -> dict[str, float]:
 #
 # Trust region (measured here -- OUTSIDE it, esp. far/low reach and off-
 # centerline |y|>~100mm, the fit EXTRAPOLATES and is approximate): real fwd
-# ~150-235mm, real z ~35-150mm, near the centerline.
+# ~150-235mm, real z ~30-150mm, near the centerline.
 #
 # CONFIRM ON THE FIRST REAL MOVE: command a known centerline target and ruler-
 # check the tip lands AT it. If it lands short/low, the sign is wrong -- stop
 # and fix before further moves.
 # --------------------------------------------------------------------------- #
-_AIM_FWD_COEF = (0.9968, -0.0790, 49.156)    # aim_fwd = a*real_fwd + b*real_z + c
-_AIM_Z_COEF = (-0.7766, 1.0637, 178.558)     # aim_z   = a*real_fwd + b*real_z + c
+_AIM_FWD_COEF = (1.0729, -0.0394, 30.431)    # aim_fwd = a*real_fwd + b*real_z + c
+_AIM_Z_COEF = (-0.2221, 1.3511, 42.187)      # aim_z   = a*real_fwd + b*real_z + c
 
 _PITCH_FULL_DEG = -88.0  # correction is fully on at/beyond this (vertical)
 _PITCH_NONE_DEG = -82.0  # correction is fully off at/beyond this
