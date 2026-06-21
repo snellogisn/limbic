@@ -295,13 +295,19 @@ def _llm_verifier(client, model: str) -> Callable[..., dict[str, Any]]:
         },
     }
     system = (
-        "You verify whether a tabletop robot-arm task has been accomplished. Judge "
-        "from the executed plan, the execution result, and the current sensor "
-        "snapshot. Be honest. If the plan executed cleanly and nothing in the "
-        "snapshot contradicts success, treat the task as complete (richer object-"
-        "level confirmation will be available once a detection feed is added). If "
-        "execution errored, or the snapshot shows the goal was not met, mark it "
-        "incomplete and say what to change."
+        "You verify whether a tabletop robot-arm task has been accomplished. The arm "
+        "has been moved HOME and the cameras re-detected the scene, so judge from the "
+        "executed plan, the execution result, and the current sensor snapshot. "
+        "Be LENIENT and practical, NOT a perfectionist. 'Close enough' counts as "
+        "done: real grasps and placements land a centimetre or two off, objects lean, "
+        "stacks aren't perfectly aligned — none of that is failure. Pass the task as "
+        "long as the goal is essentially achieved (e.g. for a stack, the object is on "
+        "top of the other even if slightly off-centre; for a move, it's roughly at the "
+        "target). Only mark it INCOMPLETE on a CLEAR, unambiguous failure — execution "
+        "errored, the object was never moved/grasped, it's nowhere near the target, or "
+        "it fell on the floor. When in doubt, treat it as complete. Do NOT demand a "
+        "re-do for small positional imperfection — over-correcting usually makes it "
+        "worse. If it really is incomplete, say briefly what to change."
     )
 
     def verify(instruction, plan, results, snapshot, exec_error=None) -> dict[str, Any]:
@@ -484,6 +490,21 @@ def plan_and_run(
             if not verify:
                 status = "completed"
                 break
+
+            # The plan ran — now CHECK it. Move the arm HOME first so it isn't
+            # occluding the cameras (and home is the right resting pose after a
+            # task), THEN re-detect to perceive the result. A user stop during the
+            # homing still aborts; any other homing hiccup is non-fatal — we verify
+            # from wherever the arm ended up.
+            trail.thought("verify", message="task executed — homing, then re-checking with the camera")
+            try:
+                arm.go_home()
+            except BaseException as exc:  # noqa: BLE001
+                from ..control import MotionStopped
+
+                if isinstance(exc, MotionStopped):
+                    raise
+                # otherwise ignore: homing is best-effort before the visual check
 
             snapshot = inputs.snapshot()
             verdict = verify_fn(instruction, final_plan, results, snapshot, exec_error)

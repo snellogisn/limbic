@@ -42,11 +42,11 @@ os.environ.setdefault("LIMBIC_LOG_DIR", str(_REPO_ROOT / "logs"))
 # machine with no such port (or no lerobot) the auto backend falls back to mock.
 os.environ.setdefault("LIMBIC_PORT", "COM5")
 
-# SINGLE-SHOT by default: the website perceives ONCE, then runs the whole plan
-# start-to-finish with no mid-run camera re-checking. So turn OFF the closed-loop
-# visual grasp correction (aligned_pick -> align_to_object); the brain's verify+
-# retry loop is also disabled at the plan_and_run call below. Both are setdefault/
-# overridable, so an explicit env still wins.
+# No MID-RUN camera correction: the plan executes start-to-finish without the
+# closed-loop visual grasp nudge (aligned_pick -> align_to_object), which used to
+# over-adjust and miss. The arm only re-checks the camera AFTER the task — it homes
+# and re-detects for a single, lenient verification pass (see the plan_and_run call
+# below). setdefault, so an explicit env still wins.
 os.environ.setdefault("LIMBIC_VISUAL_ALIGN", "0")
 
 # Motion timing for web-driven runs is set HERE, before limbic imports (config.py
@@ -276,10 +276,13 @@ def run_task(task: str, mode: str = "auto", on_start=None) -> dict[str, Any]:
                 try:
                     # plan_and_run logs into our already-active run; it returns a
                     # status (completed / incomplete / cannot_complete) rather than
-                    # raising for a failed task. verify=False => SINGLE-SHOT: perceive
-                    # once, build the plan, execute start-to-finish, no post-exec
-                    # camera re-check or retry (paired with LIMBIC_VISUAL_ALIGN=0).
-                    outcome = plan_and_run(task, arm, verify=False)
+                    # raising for a failed task. verify=True: after executing, the arm
+                    # homes and the cameras re-detect for a LENIENT success check (the
+                    # verifier accepts "close enough" — it won't re-do a grasp over a
+                    # small positional miss). max_attempts=2 caps it at one retry so a
+                    # genuine miss gets a single redo, not endless over-correction.
+                    # (Auto-falls back to single-shot if no camera is available.)
+                    outcome = plan_and_run(task, arm, verify=True, max_attempts=2)
                 except (ValueError, RuntimeError) as exc:
                     # A refusal or a hard planner error: surface as cannot_complete.
                     log.thought("cannot_complete", str(exc))
