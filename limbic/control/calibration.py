@@ -92,11 +92,12 @@ def arm_to_ikpy_rad(arm_deg: dict[str, float]) -> dict[str, float]:
 #
 # Model (table-frame mm, measured at pitch -90, planar reach + z; the planar
 # IK has ~0 model error, so "aim" = where the IK puts the model tip):
-#   aim_fwd = 1.0729*real_fwd - 0.0394*real_z + 30.431
-#   aim_z   = -0.2221*real_fwd + 1.3511*real_z + 42.187
-# i.e. extend reach ~+45mm, and add MORE up-correction the higher z is. Fit
-# residual < 3mm on 4 near-centerline points (incl. the (160,0,60) ruler check);
-# round-trips to <1mm across the trust region.
+#   aim_fwd = 1.1582*real_fwd + 9.908
+#   aim_z   = 0.7222*real_z   + 28.333
+# Anchored on two careful on-centerline ruler checks -- (150,0,30)->(155,0,30)
+# and (160,0,60)->(165,0,84) -- which pinned the z slope (the noisy first sweep
+# had it ~2x too steep, over-aiming z high); reach also uses two far points for
+# how droop grows with distance (resid <2mm). Reach and z are decoupled here.
 #
 # Pitch blend: the droop is full with the gripper vertical and fades to NONE
 # (aim = real) as it tilts toward horizontal -- we only have vertical data, so
@@ -110,8 +111,8 @@ def arm_to_ikpy_rad(arm_deg: dict[str, float]) -> dict[str, float]:
 # check the tip lands AT it. If it lands short/low, the sign is wrong -- stop
 # and fix before further moves.
 # --------------------------------------------------------------------------- #
-_AIM_FWD_COEF = (1.0729, -0.0394, 30.431)    # aim_fwd = a*real_fwd + b*real_z + c
-_AIM_Z_COEF = (-0.2221, 1.3511, 42.187)      # aim_z   = a*real_fwd + b*real_z + c
+_AIM_FWD_COEF = (1.1582, 0.0, 9.908)         # aim_fwd = a*real_fwd + b*real_z + c
+_AIM_Z_COEF = (0.0, 0.7222, 28.333)          # aim_z   = a*real_fwd + b*real_z + c
 
 _PITCH_FULL_DEG = -88.0  # correction is fully on at/beyond this (vertical)
 _PITCH_NONE_DEG = -82.0  # correction is fully off at/beyond this
