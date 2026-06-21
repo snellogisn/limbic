@@ -13,8 +13,9 @@ documented defaults so the planner only has to supply *where* the object is:
          ``min_grasp_z_mm`` so the fingers can't be jammed into the table.
        * **Account for the claw's lateral offset.** On this arm the closing claw
          pulls slightly to one side, so aiming the *tip* a few mm off the object
-         centre lands the *grip* on centre. ``claw_y_offset_mm`` (default -5,
-         i.e. 5mm toward -y) encodes that bias; set it to 0 for a symmetric claw.
+         centre lands the *grip* on centre. ``claw_y_offset_mm`` (default 0 — no
+         lateral bias; this claw was measured to close on centre) sets that bias;
+         give it a nonzero value only if the claw is found to pull to one side.
   3. Close the claw onto the object.
   4. Lift back to the hover height so the object clears the table before any
      transit move — lift-before-retract is what stops a grasped object from
@@ -63,8 +64,8 @@ class Pick(Primitive):
         "claw_y_offset_mm": {
             "type": "number",
             "description": "Lateral tip offset to compensate for the claw pulling to "
-            "one side as it closes (mm in y). Default -5.",
-            "default": -5.0,
+            "one side as it closes (mm in y). Default 0 (no offset).",
+            "default": 0.0,
         },
         "min_grasp_z_mm": {
             "type": "number",
@@ -81,7 +82,7 @@ class Pick(Primitive):
         object_height_mm: float = 25.0,
         hover_z_mm: float = 60.0,
         grasp_depth_mm: float = 7.5,
-        claw_y_offset_mm: float = -5.0,
+        claw_y_offset_mm: float = 0.0,
         min_grasp_z_mm: float = 3.0,
         **kwargs: Any,
     ) -> tuple[float, float, float]:
