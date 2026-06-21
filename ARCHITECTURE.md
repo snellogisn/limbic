@@ -59,12 +59,28 @@ context (the live arm) so motor senses work without the LLM having to wire them.
 Cameras use the cross-platform `open_camera` helper (not Windows DirectShow).
 
 ### The Mind — `limbic/brain/`
-Turns an instruction into a validated plan. It shows Claude the primitive and
-input catalogs as tools, lets it query senses, captures the ordered plan it
-submits, **validates every step against the registry**, and runs it through the
-sequence runner — so our code (and the safety layer) stays in control of every
-motor command. It routes models by difficulty: a quick model for short/urgent
-instructions, a large model for complex spatial reasoning.
+Accomplishes an instruction as a **plan → execute → verify → retry cycle**:
+
+1. **Plan** — Claude perceives via `sense_*` tools if needed, may **create or edit
+   a motion primitive** (`create_primitive` / `edit_primitive`) when no existing
+   skill fits, then commits one ordered list of steps (`submit_plan`). Every step
+   is **validated against the registry** before anything moves.
+2. **Execute** — the list runs through the sequence runner and `RobotArm`, so the
+   safety layer governs every motor command (our code drives the arm, not Claude).
+3. **Verify** — a pluggable check (`verifier=`) decides *satisfied* vs *incomplete*
+   from a fresh `inputs.snapshot()` + the execution results.
+4. **Retry** — if incomplete, the reason + snapshot are fed back and the cycle
+   repeats (revise the plan, or author a better primitive), up to `max_attempts`.
+
+It routes models by difficulty (quick model for short/urgent, large model for
+complex spatial reasoning) and accepts an injected `client`/`verifier` so the whole
+cycle is testable offline without an API key.
+
+**Live-input seam:** `inputs.snapshot()` reads *every* registered sense, so when a
+streaming object detector (e.g. YOLO: what/where/size) is later dropped into
+`inputs/library/`, it automatically joins every snapshot and makes verification
+detection-grounded — no change to the brain. That detector + the `detect_objects`
+composition are intentionally integrated separately.
 
 ## How the LLM composes — and evolves — primitives
 

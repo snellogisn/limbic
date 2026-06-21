@@ -16,64 +16,33 @@ Typical use:
 
 from __future__ import annotations
 
-import importlib
-import inspect
-import pkgutil
 from typing import Any
 
+from .._core import Registry
+from . import library
 from .base import Primitive
 
-_REGISTRY: dict[str, Primitive] = {}
-_LOADED = False
-
-
-def _discover() -> None:
-    """Import every module in ``library/`` and register the primitives it defines."""
-    global _LOADED
-    if _LOADED:
-        return
-
-    from . import library  # local import to avoid a cycle at module load
-
-    for module_info in pkgutil.iter_modules(library.__path__):
-        module = importlib.import_module(f"{library.__name__}.{module_info.name}")
-        for _, obj in inspect.getmembers(module, inspect.isclass):
-            # Register concrete Primitive subclasses defined in this module only.
-            if (
-                issubclass(obj, Primitive)
-                and obj is not Primitive
-                and obj.__module__ == module.__name__
-                and getattr(obj, "name", "")
-            ):
-                _REGISTRY[obj.name] = obj()
-    _LOADED = True
+# One shared auto-discovery registry, scoped to the Primitive subclasses in library/.
+_registry = Registry(Primitive, library)
 
 
 def reload() -> None:
     """Forget all discovered primitives and re-scan ``library/`` on next access.
 
-    Useful after the LLM writes or edits a primitive file at runtime and wants the
-    new/changed primitive picked up without restarting the process.
+    Useful after a primitive file is written or edited at runtime and the new or
+    changed primitive should be picked up without restarting the process.
     """
-    global _LOADED
-    _REGISTRY.clear()
-    _LOADED = False
+    _registry.reload()
 
 
 def all_primitives() -> dict[str, Primitive]:
     """Return ``{name: primitive}`` for every discovered primitive."""
-    _discover()
-    return dict(_REGISTRY)
+    return _registry.all()  # type: ignore[return-value]
 
 
 def get(name: str) -> Primitive:
     """Return the instantiated primitive named ``name`` (raises ``KeyError`` if absent)."""
-    _discover()
-    if name not in _REGISTRY:
-        raise KeyError(
-            f"no primitive named '{name}'. Available: {', '.join(sorted(_REGISTRY))}"
-        )
-    return _REGISTRY[name]
+    return _registry.get(name)  # type: ignore[return-value]
 
 
 def catalog() -> list[dict[str, Any]]:
@@ -81,5 +50,4 @@ def catalog() -> list[dict[str, Any]]:
 
     This is what gets shown to the LLM so it can choose which primitives to use.
     """
-    _discover()
-    return [p.describe() for p in sorted(_REGISTRY.values(), key=lambda p: p.name)]
+    return _registry.catalog()

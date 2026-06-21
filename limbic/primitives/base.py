@@ -24,58 +24,25 @@ from __future__ import annotations
 import abc
 from typing import Any
 
+from .._core import Capability
 from ..control import RobotArm
 
 
-class Primitive(abc.ABC):
+class Primitive(Capability):
     """Base class for every motion primitive.
 
-    Subclasses set the three class attributes and implement :meth:`run`. See
-    ``primitives/library/`` for worked examples and ``Primitive.describe`` for
-    the shape the planner/LLM consumes.
+    Shares ``name`` / ``summary`` / ``parameters`` / ``describe()`` and the
+    required-argument check with :class:`~limbic._core.Capability`; a primitive
+    just adds :meth:`run`. See ``primitives/library/`` for worked examples.
     """
 
-    #: Unique identifier the planner uses to refer to this primitive.
-    name: str = ""
-    #: One-line description for the browsable catalog.
-    summary: str = ""
-    #: JSON-schema-style parameter spec: {arg: {"type", "description", "default"?}}.
-    parameters: dict[str, dict[str, Any]] = {}
+    _kind = "primitive"
 
     @abc.abstractmethod
     def run(self, arm: RobotArm, **kwargs: Any) -> Any:
         """Execute the primitive against ``arm`` with validated keyword arguments."""
 
-    # ------------------------------------------------------------------ #
-    # Introspection used by the registry, the catalog, and the LLM tools
-    # ------------------------------------------------------------------ #
-    @classmethod
-    def describe(cls) -> dict[str, Any]:
-        """Return a serialisable description (name, summary, parameter schema).
-
-        This is the unit of information the LLM sees when choosing primitives and
-        the basis for the generated tool schema in ``brain/tools.py``.
-        """
-        return {
-            "name": cls.name,
-            "summary": cls.summary,
-            "parameters": cls.parameters,
-        }
-
     def __call__(self, arm: RobotArm, **kwargs: Any) -> Any:
-        """Validate required args against the schema, then run.
-
-        Required = any parameter whose schema has no ``"default"`` key. Missing
-        required args raise a clear ``TypeError`` before any motion happens.
-        """
-        missing = [
-            arg
-            for arg, spec in self.parameters.items()
-            if "default" not in spec and arg not in kwargs
-        ]
-        if missing:
-            raise TypeError(
-                f"primitive '{self.name}' missing required argument(s): "
-                f"{', '.join(missing)}"
-            )
+        """Validate required args (clear ``TypeError`` if missing), then run."""
+        self._check_required(kwargs)
         return self.run(arm, **kwargs)

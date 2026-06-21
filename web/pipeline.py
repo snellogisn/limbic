@@ -36,11 +36,21 @@ from typing import Any
 _REPO_ROOT = Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(_REPO_ROOT))
 os.environ.setdefault("LIMBIC_LOG_DIR", str(_REPO_ROOT / "logs"))
-# Run the mock arm fast so web requests return promptly (real hardware is
-# unaffected — these only shrink the simulated inter-step delays).
-os.environ.setdefault("LIMBIC_SMOOTH_DT", "0.001")
-os.environ.setdefault("LIMBIC_SLOW_DT", "0.001")
-os.environ.setdefault("LIMBIC_GRIPPER_SETTLE", "0.02")
+
+# Motion timing for web-driven runs is set HERE, before limbic imports (config.py
+# reads these env vars once at import). Safety rule: the website must NEVER drive
+# the physical arm at speed. So only an explicit mock backend runs fast (for a
+# snappy offline demo); anything that could be real hardware (backend "real", or
+# "auto", which may resolve to the real arm) moves DELIBERATELY VERY SLOWLY.
+# To get the fast offline demo, run with LIMBIC_BACKEND=mock.
+if os.environ.get("LIMBIC_BACKEND", "auto").lower() == "mock":
+    os.environ.setdefault("LIMBIC_SMOOTH_DT", "0.001")     # snappy simulation only
+    os.environ.setdefault("LIMBIC_SLOW_DT", "0.001")
+    os.environ.setdefault("LIMBIC_GRIPPER_SETTLE", "0.02")
+else:
+    os.environ.setdefault("LIMBIC_SMOOTH_DT", "0.12")      # ~6x slower than default
+    os.environ.setdefault("LIMBIC_SLOW_DT", "0.18")        # precision moves: very slow
+    os.environ.setdefault("LIMBIC_GRIPPER_SETTLE", "0.7")
 
 from limbic import RobotArm, runlog  # noqa: E402
 from limbic.control import safety  # noqa: E402
@@ -206,18 +216,26 @@ def run_task(task: str, mode: str = "auto") -> dict[str, Any]:
                 from limbic.brain import plan_and_run
 
                 try:
-                    # plan_and_run logs into our already-active run.
+                    # plan_and_run logs into our already-active run; it returns a
+                    # status (completed / incomplete / cannot_complete) rather than
+                    # raising for a failed task.
                     outcome = plan_and_run(task, arm)
+                except (ValueError, RuntimeError) as exc:
+                    # A refusal or a hard planner error: surface as cannot_complete.
+                    log.thought("cannot_complete", str(exc))
+                    result.update(status="cannot_complete", model="claude", error=str(exc))
+                else:
+                    st = outcome.get("status", "completed")
+                    verdict = outcome.get("verification") or {}
+                    # "incomplete" (ran out of retries) and "cannot_complete" both
+                    # map to the UI's cannot_complete, with the verifier's reason.
                     result.update(
-                        status="completed",
+                        status="completed" if st == "completed" else "cannot_complete",
                         model=outcome["model"],
                         plan=outcome["plan"],
                         rationale=outcome["rationale"],
+                        error=None if st == "completed" else (verdict.get("reason") or f"task {st} after retries"),
                     )
-                except (ValueError, RuntimeError) as exc:
-                    # No usable plan / a refusal: the model could not complete it.
-                    log.thought("cannot_complete", str(exc))
-                    result.update(status="cannot_complete", model="claude", error=str(exc))
             else:
                 log.thought(
                     "model_choice",
