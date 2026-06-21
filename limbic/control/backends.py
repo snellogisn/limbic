@@ -131,7 +131,25 @@ class RealBackend(HardwareBackend):
             disable_torque_on_disconnect=not self._config.hold_torque,
         )
         self._robot = SO101Follower(cfg)
-        self._robot.connect()
+        # Connect WITHOUT lerobot's interactive calibration. With calibrate=False
+        # it never calls calibrate(), which would block on input() (and offer to
+        # run the destructive hand-guided range-of-motion routine). This is the
+        # safe, non-interactive path for scripts and the web server alike.
+        self._robot.connect(calibrate=False)
+        # lerobot only loads the calibration file into the motors as part of
+        # calibrate(); with calibrate=False we must do it ourselves when the
+        # servos' stored calibration no longer matches the file (e.g. after a
+        # power-cycle). This is exactly what pressing ENTER at lerobot's prompt
+        # does -- load the existing file -- and NEVER the range-of-motion calib.
+        if not self._robot.is_calibrated:
+            if not getattr(self._robot, "calibration", None):
+                raise RuntimeError(
+                    f"No calibration found for robot id {self._config.robot_id!r}. "
+                    "Refusing to connect (a missing calibration would otherwise "
+                    "trigger lerobot's interactive range-of-motion routine)."
+                )
+            self._robot.bus.write_calibration(self._robot.calibration)
+            self._robot.configure()
 
     def disconnect(self) -> None:
         if self._robot is not None:
