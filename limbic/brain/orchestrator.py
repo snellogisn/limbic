@@ -30,6 +30,7 @@ injected (so the whole cycle is testable offline without a key).
 from __future__ import annotations
 
 import json
+import math
 import re
 import uuid
 from typing import Any, Callable
@@ -145,12 +146,17 @@ def _validate_plan(plan: Any) -> list[dict[str, Any]]:
 # --------------------------------------------------------------------------- #
 # One planning turn: perceive / author / submit a validated plan
 # --------------------------------------------------------------------------- #
-def _dispatch_tool(block: Any, trail, verbose: bool) -> tuple[dict[str, Any], dict | None]:
+def _dispatch_tool(block: Any, trail, verbose: bool, perceptions: dict | None = None) -> tuple[dict[str, Any], dict | None]:
     """Run one tool_use block. Returns (tool_result, captured_plan_or_None).
 
     ``captured_plan`` is non-None only for a valid ``submit_plan`` (a dict with
     ``plan`` + ``rationale``). Senses dispatch to ``inputs.read``; create/edit
     dispatch to the authoring helpers (which hot-reload the registry).
+
+    ``perceptions``, if given, accumulates the planner's object detections (the
+    "before" world state) so the outcome of the attempt can be scored against it:
+    its ``prompts`` set records what was looked for (to re-detect later) and its
+    ``objects`` list collects the detected objects.
     """
     name = block.name
     tool_id = block.id
@@ -190,6 +196,15 @@ def _dispatch_tool(block: Any, trail, verbose: bool) -> tuple[dict[str, Any], di
         try:
             reading = inputs.read(sense, **(block.input or {}))
             payload: Any = {"reading": reading}
+            # Capture object detections as the "before" world state for outcome
+            # scoring: remember the prompt (to re-detect after the action) and the
+            # objects it located.
+            if (perceptions is not None and sense == "object_detections"
+                    and isinstance(reading, dict) and reading.get("objects")):
+                prompt = (block.input or {}).get("prompt")
+                if prompt:
+                    perceptions.setdefault("prompts", set()).add(prompt)
+                    perceptions.setdefault("objects", []).extend(reading["objects"])
         except Exception as exc:
             payload = {"error": str(exc)}
         trail.thought("perceive", message=f"queried sense '{sense}'", sense=sense, result=payload)
@@ -285,13 +300,16 @@ def _stream_response(client, create_kwargs, messages, trail):
         return stream.get_final_message()
 
 
-def _plan_turn(client, model, tools, system, messages, trail, verbose) -> dict | None:
+def _plan_turn(client, model, tools, system, messages, trail, verbose, perceptions=None) -> dict | None:
     """Drive Claude until it commits a valid plan (or gives up). Mutates ``messages``.
 
     Returns ``{"plan", "rationale"}`` on success, or ``None`` if the model ended
     its turn without a usable plan. Perception, authoring, and plan-rejection
     feedback all happen here, so a single "attempt" can self-heal (e.g. create a
     missing primitive, or fix a bad argument) before it ever moves the arm.
+
+    ``perceptions`` (if given) collects the planner's object detections so the
+    attempt's outcome can later be measured against where things were.
     """
     create_kwargs: dict[str, Any] = {
         "model": model, "max_tokens": 16000, "tools": tools, "system": system,
@@ -318,7 +336,7 @@ def _plan_turn(client, model, tools, system, messages, trail, verbose) -> dict |
         tool_results: list[dict[str, Any]] = []
         captured: dict | None = None
         for block in tool_uses:
-            tool_result, plan = _dispatch_tool(block, trail, verbose)
+            tool_result, plan = _dispatch_tool(block, trail, verbose, perceptions)
             tool_results.append(tool_result)
             if plan is not None:
                 captured = plan
@@ -352,6 +370,153 @@ def _execute(arm, plan, verbose) -> tuple[list[Any], str | None]:
         return [], f"{type(exc).__name__}: {exc}"
 
 
+# --------------------------------------------------------------------------- #
+# Before/after outcome measurement
+# --------------------------------------------------------------------------- #
+# So a retry knows HOW it missed, not just THAT it did: we re-detect the objects
+# the planner located, compare their positions before vs after the action, and
+# quantify each aimed step against where it ended up. That measured error is what
+# lets attempt 2 actually differ from attempt 1.
+_AIMED_PRIMS = ("pick", "aligned_pick", "place", "push", "move_to", "descend_to", "reach_above")
+
+
+def _obj_xy(o: Any) -> tuple[float, float] | None:
+    """Pull a detection's table (x, y) in mm, or None if it has no coordinate."""
+    tm = o.get("table_mm") if isinstance(o, dict) else None
+    if isinstance(tm, (list, tuple)) and len(tm) >= 2 and tm[0] is not None:
+        return float(tm[0]), float(tm[1])
+    return None
+
+
+def _nearest(objs: list[dict], x: float, y: float, label: str | None = None):
+    """Nearest detection to (x, y) (optionally same label). Returns (obj, dist_mm)."""
+    best, best_d = None, float("inf")
+    for o in objs:
+        if label is not None and o.get("label") != label:
+            continue
+        p = _obj_xy(o)
+        if p is None:
+            continue
+        d = math.hypot(p[0] - x, p[1] - y)
+        if d < best_d:
+            best, best_d = o, d
+    return best, best_d
+
+
+def _redetect(prompts) -> list[dict]:
+    """Re-run each detection prompt; return a flat, de-duplicated object list."""
+    found: list[dict] = []
+    for prompt in prompts:
+        try:
+            reading = inputs.read("object_detections", prompt=prompt)
+        except Exception:
+            continue
+        if not isinstance(reading, dict):
+            continue
+        for o in reading.get("objects") or []:
+            p = _obj_xy(o)
+            if p is None:
+                continue
+            dup = any(o.get("label") == s.get("label")
+                      and (_obj_xy(s) or (1e9, 1e9))
+                      and math.hypot(p[0] - _obj_xy(s)[0], p[1] - _obj_xy(s)[1]) < 12
+                      for s in found if _obj_xy(s))
+            if not dup:
+                found.append(o)
+    return found
+
+
+def _measure_outcome(before: list[dict], after: list[dict], plan: list[dict]) -> dict | None:
+    """Quantify the attempt: per aimed step + per object before->after. None if nothing.
+
+    For each aimed step we report the nearest object detected AFTER the action and
+    its offset from the aim (so a missed grasp / off place is a concrete mm vector).
+    For each object the planner saw we report how far it moved (or that it's gone —
+    e.g. lifted away). Factual numbers; the verifier/planner interpret them.
+    """
+    if not before and not after:
+        return None
+
+    steps: list[dict[str, Any]] = []
+    for step in plan:
+        prim = step.get("primitive")
+        if prim not in _AIMED_PRIMS:
+            continue
+        args = step.get("args", {}) or {}
+        if prim == "push" and args.get("x2_mm") is not None:
+            ax, ay = float(args["x2_mm"]), float(args["y2_mm"])  # push aims at its destination
+        elif args.get("x_mm") is not None and args.get("y_mm") is not None:
+            ax, ay = float(args["x_mm"]), float(args["y_mm"])
+        else:
+            continue
+        entry: dict[str, Any] = {"step": prim, "aim_mm": [round(ax, 1), round(ay, 1)]}
+        near, dist = _nearest(after, ax, ay)
+        if near is not None and dist < 60.0:
+            nx, ny = _obj_xy(near)
+            entry["nearest_after"] = {
+                "label": near.get("label"),
+                "xy_mm": [round(nx, 1), round(ny, 1)],
+                "offset_from_aim_mm": [round(nx - ax, 1), round(ny - ay, 1)],
+            }
+        else:
+            entry["nearest_after"] = None  # nothing landed near the aim
+        steps.append(entry)
+
+    objects: list[dict[str, Any]] = []
+    used = [False] * len(after)
+    for b in before:
+        bp = _obj_xy(b)
+        if bp is None:
+            continue
+        mi, md = None, float("inf")
+        for i, a in enumerate(after):
+            if used[i] or a.get("label") != b.get("label"):
+                continue
+            ap = _obj_xy(a)
+            if ap is None:
+                continue
+            d = math.hypot(bp[0] - ap[0], bp[1] - ap[1])
+            if d < md:
+                mi, md = i, d
+        rec: dict[str, Any] = {"label": b.get("label"), "before_mm": [round(bp[0], 1), round(bp[1], 1)]}
+        if mi is not None:
+            used[mi] = True
+            ap = _obj_xy(after[mi])
+            rec["after_mm"] = [round(ap[0], 1), round(ap[1], 1)]
+            rec["moved_mm"] = round(md, 1)
+        else:
+            rec["after_mm"] = None  # not seen afterwards (lifted away, or occluded)
+        objects.append(rec)
+
+    if not steps and not objects:
+        return None
+    return {"aimed_steps": steps, "objects": objects,
+            "objects_before": len(before), "objects_after": len(after)}
+
+
+def _outcome_hint(outcome: dict | None) -> str:
+    """A short natural-language read of the measured outcome for the retry feedback."""
+    if not outcome:
+        return ""
+    lines: list[str] = []
+    for s in outcome.get("aimed_steps", []):
+        na = s.get("nearest_after")
+        if na:
+            lines.append(
+                f"- {s['step']} aimed at {s['aim_mm']} mm: nearest object after is "
+                f"'{na['label']}' at {na['xy_mm']} mm — offset {na['offset_from_aim_mm']} mm "
+                "from your aim (to land on it, shift your aim by that offset)."
+            )
+        else:
+            lines.append(f"- {s['step']} aimed at {s['aim_mm']} mm: NOTHING detected near the aim afterwards.")
+    for o in outcome.get("objects", []):
+        if o.get("after_mm") is None:
+            lines.append(f"- '{o['label']}' was at {o['before_mm']} mm and is NOT detected now (likely lifted/removed).")
+        elif o.get("moved_mm", 0) >= 5:
+            lines.append(f"- '{o['label']}' moved {o['moved_mm']} mm: {o['before_mm']} -> {o['after_mm']} mm.")
+    return "\n".join(lines)
+
+
 def _llm_verifier(client, model: str) -> Callable[..., dict[str, Any]]:
     """Default verifier: ask Claude whether the task is satisfied, from the snapshot.
 
@@ -377,7 +542,12 @@ def _llm_verifier(client, model: str) -> Callable[..., dict[str, Any]]:
     system = (
         "You verify whether a tabletop robot-arm task has been accomplished. The arm "
         "has been moved HOME and the cameras re-detected the scene, so judge from the "
-        "executed plan, the execution result, and the current sensor snapshot. "
+        "executed plan, the execution result, and the current sensor snapshot. The "
+        "snapshot may include a `measured_outcome` field: objects re-detected AFTER the "
+        "action, with each step's aim and how far the nearest object ended up from it, "
+        "plus how far each object moved. Use those real numbers as your primary evidence "
+        "of success/failure (e.g. a pick step whose object is still right at the aim = "
+        "missed; a place whose object is >1 cm from the aim = off). "
         "Aim for REASONABLE precision: accept minor imperfection, but the goal must "
         "ACTUALLY be achieved. A few millimetres of offset or a slight lean is fine; "
         "being off by a centimetre or more, or ending in the wrong STATE, is NOT. "
@@ -554,7 +724,10 @@ def plan_and_run(
             if verbose:
                 print(f"[brain] --- attempt {attempt}/{max_attempts} ---")
 
-            captured = _plan_turn(client, chosen_model, tools, system_prompt, messages, trail, verbose)
+            # Collect what the planner detects this attempt (the "before" world
+            # state), so the outcome can be measured against it after the action.
+            perceptions: dict[str, Any] = {"prompts": set(), "objects": []}
+            captured = _plan_turn(client, chosen_model, tools, system_prompt, messages, trail, verbose, perceptions)
             if captured is None:
                 status = "cannot_complete"
                 last_verdict = {"satisfied": False, "reason": "model produced no usable plan", "suggestions": ""}
@@ -590,7 +763,22 @@ def plan_and_run(
                     raise
                 # otherwise ignore: homing is best-effort before the visual check
 
+            # Re-detect the objects the planner located (now the arm is clear) and
+            # MEASURE the outcome against where each step aimed — so verify + retry
+            # have a quantified error, not just pass/fail. Folded into the snapshot
+            # the verifier already reads.
             snapshot = inputs.snapshot()
+            outcome = None
+            try:
+                if perceptions.get("prompts"):
+                    after_objs = _redetect(perceptions["prompts"])
+                    outcome = _measure_outcome(perceptions.get("objects", []), after_objs, final_plan)
+            except Exception:
+                outcome = None  # measurement must never break the run
+            if outcome:
+                snapshot["measured_outcome"] = outcome
+                trail.thought("verify", message="measured outcome vs aim", outcome=outcome)
+
             verdict = verify_fn(instruction, final_plan, results, snapshot, exec_error)
             last_verdict = verdict
             trail.thought(
@@ -607,11 +795,21 @@ def plan_and_run(
 
             status = "incomplete"
             if attempt < max_attempts:
+                hint = _outcome_hint(outcome)
+                measured = (
+                    "MEASURED OUTCOME (objects re-detected after the action — use these "
+                    "real numbers to CORRECT your aim, this is how you improve on the last "
+                    f"attempt):\n{hint}\n"
+                    "Apply the offsets: if an object ended up +N mm in x of where you aimed, "
+                    "the target was N mm short of your aim, so shift your next aim by that "
+                    "vector. Do not just repeat the same coordinates.\n"
+                ) if hint else ""
                 messages.append({"role": "user", "content": (
                     "That attempt did NOT complete the task. "
                     f"Verifier reason: {verdict['reason']}. "
                     f"Suggestions: {verdict.get('suggestions') or '(none)'}. "
-                    f"Execution error: {exec_error or 'none'}. "
+                    f"Execution error: {exec_error or 'none'}.\n"
+                    f"{measured}"
                     f"Current sensor snapshot: {json.dumps(snapshot, default=str)}. "
                     "If an object may have MOVED since you last detected it (e.g. after "
                     "a push, a knock, or a failed grasp), call sense_object_detections "
