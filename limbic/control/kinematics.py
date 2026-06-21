@@ -76,6 +76,17 @@ def _engine():
     return _ENGINE
 
 
+def active_engine() -> str:
+    """Name of the reaching-IK engine actually in use: ``"mink"`` or ``"planar"``.
+
+    Builds the engine on first call (so it reflects the REAL choice, including a
+    silent fallback to planar when mink/mujoco can't import). Useful for a startup
+    banner that verifies the demo box is on the proper solver.
+    """
+    _engine()
+    return "mink" if _USING_MINK else "planar"
+
+
 @dataclass(frozen=True)
 class IKSolution:
     """A full joint solution (arm-convention degrees) plus whether it was exactly reachable."""

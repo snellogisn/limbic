@@ -46,6 +46,12 @@ SMOOTH_DT_S = float(os.environ.get("LIMBIC_SMOOTH_DT", "0.02"))       # seconds 
 SLOW_STEP_DEG = float(os.environ.get("LIMBIC_SLOW_STEP", "1.0"))      # precision (descend/grasp/place): finer ...
 SLOW_DT_S = float(os.environ.get("LIMBIC_SLOW_DT", "0.06"))           # ... and slower for controlled fine motion
 CONVERGE_TOL_DEG = 1.2  # hold the goal until servos settle within this band
+# "Home" is a COARSE move to a known-safe neutral pose, so it favours SPEED over
+# precision — "close enough", no fine convergence pass. Bigger sub-steps (fewer
+# setpoints => quicker) and a brief settle. Both env-tunable; raise HOME_STEP for
+# a faster home, lower it if the move looks jerky on the rig.
+HOME_STEP_DEG = float(os.environ.get("LIMBIC_HOME_STEP", "3.0"))     # deg per sub-step (~3x transit)
+HOME_SETTLE_S = float(os.environ.get("LIMBIC_HOME_SETTLE", "0.15"))  # brief settle after homing
 GRIPPER_SETTLE_S = float(os.environ.get("LIMBIC_GRIPPER_SETTLE", "0.5"))  # final claw settle once it's stopped
 # The claw is one slow servo with no "done" signal, and it's slower than any fixed
 # guess. So instead of sleeping a constant we DRIVE it to its target and watch the

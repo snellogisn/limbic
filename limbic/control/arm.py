@@ -29,6 +29,8 @@ from .config import (
     GRIPPER_POLL_S,
     GRIPPER_SETTLE_S,
     GRIPPER_STOP_TOL,
+    HOME_SETTLE_S,
+    HOME_STEP_DEG,
     MOVE_SETTLE_S,
     SLOW_DT_S,
     SLOW_STEP_DEG,
@@ -267,7 +269,7 @@ class RobotArm:
         gripper at its halfway opening — every motor centred. The arm is moved
         first, then the gripper is actuated in isolation (§0.6 gripper rule).
         """
-        self._drive_to(HOME_POSE)
+        self._drive_to(HOME_POSE, coarse=True)  # close enough — speed over precision
         self._set_gripper(_GRIPPER_HOME)
         joints = self.read_joints()
         self._runlog().movement(
@@ -371,12 +373,18 @@ class RobotArm:
     # ------------------------------------------------------------------ #
     # Smooth interpolated motion (shared by every Cartesian/joint move)
     # ------------------------------------------------------------------ #
-    def _drive_to(self, target_joints: dict[str, float], slow: bool = False) -> None:
+    def _drive_to(self, target_joints: dict[str, float], slow: bool = False,
+                  coarse: bool = False) -> None:
         """Stream a smooth ease-in/ease-out trajectory to ``target_joints``.
 
         Interpolates from the current pose to the (soft-limit-clamped) target in
         fine sub-steps with a cosine velocity profile, then holds the goal until
         the joints converge. The gripper is preserved at its current value.
+
+        ``coarse`` trades precision for speed (used by ``go_home``): bigger
+        sub-steps and NO fine convergence pass — the open-loop landing is "close
+        enough" for a neutral home, and skipping the convergence retries + long
+        settle is most of the time saving.
         """
         current = self.read_joints()
         # Hold the COMMANDED claw target, not the read-back: if the claw is
@@ -388,7 +396,7 @@ class RobotArm:
             gripper = current.get(GRIPPER_JOINT, GRIPPER_OPEN)
 
         target = {j: clamp_joint(j, float(target_joints[j])) for j in ARM_JOINTS}
-        step = SLOW_STEP_DEG if slow else SMOOTH_STEP_DEG
+        step = HOME_STEP_DEG if coarse else (SLOW_STEP_DEG if slow else SMOOTH_STEP_DEG)
         dt = SLOW_DT_S if slow else SMOOTH_DT_S
 
         max_travel = max(abs(target[j] - current[j]) for j in ARM_JOINTS)
@@ -405,17 +413,20 @@ class RobotArm:
             time.sleep(dt)
 
         # Converge: the streamed trajectory is open-loop, so settle onto the goal.
-        for _ in range(25):
-            self._check_stop()
-            actual = self.read_joints()
-            if max(abs(target[j] - actual[j]) for j in ARM_JOINTS) <= CONVERGE_TOL_DEG:
-                break
-            command = dict(target)
-            command[GRIPPER_JOINT] = gripper
-            self.backend.send_joints(command)
-            time.sleep(0.02)
+        # Skipped in coarse mode — "close enough" is the goal for a neutral home.
+        if not coarse:
+            for _ in range(25):
+                self._check_stop()
+                actual = self.read_joints()
+                if max(abs(target[j] - actual[j]) for j in ARM_JOINTS) <= CONVERGE_TOL_DEG:
+                    break
+                command = dict(target)
+                command[GRIPPER_JOINT] = gripper
+                self.backend.send_joints(command)
+                time.sleep(0.02)
 
         # Settle between key points: hold here a beat so the arm physically
         # arrives before the next action (e.g. a claw close) begins — keeps each
         # point-to-point move discrete and the claw acting in isolation (§0.6).
-        self._settle()
+        # Coarse home only needs a brief settle.
+        self._settle(HOME_SETTLE_S if coarse else MOVE_SETTLE_S)

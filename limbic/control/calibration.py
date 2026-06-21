@@ -179,6 +179,18 @@ def reload_accuracy_model():
     return _get_accuracy_model()
 
 
+def accuracy_model_status() -> dict:
+    """Report whether the fitted accuracy model loaded, and from where.
+
+    ``loaded`` False means we're on the built-in fallback corrections (no fitted
+    model file found at ``path``). Lets a startup banner confirm the demo box is
+    actually using the calibration that was fitted on the rig.
+    """
+    path = _accuracy_model_path()
+    return {"loaded": _get_accuracy_model() is not None, "path": str(path),
+            "exists": path.exists()}
+
+
 def command_for_real(real_fwd_mm: float, real_z_mm: float, pitch_deg: float = -90.0) -> tuple[float, float]:
     """(aim_fwd, aim_z) to feed the IK so the tip lands at REAL (real_fwd, real_z).
 

@@ -277,6 +277,18 @@ def align_to_object(
     Never raises. If the camera/calibration/API are unavailable it returns the
     input ``(x_mm, y_mm)`` unchanged with ``adjusted=False`` and a ``note``.
     """
+    # Kill-switch: when disabled, do NOT re-look with the camera — use the aim
+    # the detector already gave and grasp open-loop. This is what makes the whole
+    # run single-shot: the camera is used once (initial detection), then the plan
+    # executes start-to-finish with no mid-grasp visual correction.
+    if os.environ.get("LIMBIC_VISUAL_ALIGN", "1").strip().lower() in ("0", "false", "off", "no"):
+        return {
+            "x_mm": float(x_mm), "y_mm": float(y_mm),
+            "aligned": False, "iters": 0, "adjusted": False, "history": [],
+            "note": "visual alignment disabled (LIMBIC_VISUAL_ALIGN=0) — open-loop grasp",
+            "camera": None, "calibrated": False,
+        }
+
     from limbic.control import calibration
 
     # Resolve which camera to use (the one on the object's side, §A.5).

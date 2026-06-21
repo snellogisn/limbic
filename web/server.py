@@ -192,6 +192,36 @@ def main() -> int:
     except Exception as exc:  # never let a diagnostics print stop the server
         print(f"[web] (could not probe serial ports: {exc})")
 
+    # IK engine + calibration — verify the demo box is on the proper (mink) solver
+    # and the rig-fitted accuracy model, not a silent fallback. Building the engine
+    # here also WARMS it up so the first real move doesn't pay the build cost.
+    try:
+        from limbic.control.kinematics import active_engine
+
+        engine = active_engine()
+        if engine == "mink":
+            print("[web] IK engine: MINK (MuJoCo) — the proper solver.")
+        else:
+            print("[web] " + "!" * 64)
+            print("[web] WARNING: IK engine is PLANAR (mink/mujoco not importable).")
+            print("[web]   The demo should run on mink. Install: pip install mujoco mink qpsolvers daqp")
+            print("[web]   (or set LIMBIC_IK=planar to silence this if you mean to use planar).")
+            print("[web] " + "!" * 64)
+    except Exception as exc:
+        print(f"[web] (could not determine IK engine: {exc})")
+
+    try:
+        from limbic.control import calibration
+
+        cal = calibration.accuracy_model_status()
+        if cal["loaded"]:
+            print(f"[web] calibration: fitted accuracy model LOADED <- {cal['path']}")
+        else:
+            where = cal["path"] if cal["exists"] else f"{cal['path']} (missing)"
+            print(f"[web] calibration: NO fitted model ({where}) -> built-in fallback corrections.")
+    except Exception as exc:
+        print(f"[web] (could not check calibration: {exc})")
+
     server = ThreadingHTTPServer((args.host, args.port), Handler)
     url = f"http://{'localhost' if args.host == '127.0.0.1' else args.host}:{args.port}"
     print(f"[web] limbic console running at {url}")
