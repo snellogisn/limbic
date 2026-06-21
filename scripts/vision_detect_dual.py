@@ -1,0 +1,251 @@
+"""Dual-camera open-vocab detection with cross-verification (Part B).
+
+Runs Grounding DINO on BOTH calibrated cameras at once, side by side, with the
+same workspace (gray-mat) filtering as the single-camera viewer. The payoff of
+two cameras: every kept detection's box-centre is converted to a TABLE
+coordinate (mm, base frame) via that camera's calibration — and because both
+cameras share one frame, the same physical object lands at the same (x, y) in
+both. So we can CROSS-VERIFY:
+
+    * seen by BOTH cameras at the same (x, y)  -> "confirmed" (green)
+    * seen by only ONE camera                  -> "single"    (orange)
+
+This is the redundancy the LLM reasons over: trust confirmed objects, treat
+singletons with suspicion (occlusion, glare, or a false positive). The §8 rule
+still applies downstream — once confirmed, take the reading from the camera on
+that object's side (it's most accurate there).
+
+Usage (needs calib/ with intrinsics+extrinsics for A and B):
+    python scripts/vision_detect_dual.py
+    python scripts/vision_detect_dual.py --model IDEA-Research/grounding-dino-tiny  # faster
+
+Detect-on-demand: the live feed stays smooth; detection (two full-res DINO passes)
+runs only when you press SPACE, and the result persists on screen until the next
+press. Good for a static tabletop and keeps full base-model quality.
+
+Hotkeys:
+    SPACE   : run a full-res detection pass on both cameras (cross-verify)
+    ENTER   : save the current view + reprint the last report
+    ESC / q : quit
+"""
+
+from __future__ import annotations
+
+import os
+
+os.environ.setdefault("HF_HUB_OFFLINE", "1")
+os.environ.setdefault("TRANSFORMERS_OFFLINE", "1")
+
+import argparse
+import math
+import pathlib
+import sys
+import time
+
+import cv2 as cv
+import numpy as np
+import torch
+from torchvision.ops import nms
+from PIL import Image
+from transformers import AutoProcessor, AutoModelForZeroShotObjectDetection
+
+sys.path.insert(0, str(pathlib.Path(__file__).resolve().parent.parent))
+from limbic.control import calibration
+from limbic.control.localization import load_camera, pixel_to_table
+from limbic.platform_support import open_camera
+from limbic.vision.workspace import box_in_workspace, gray_mat_mask
+
+# ─── Settings ─────────────────────────────────────────────────────────────────
+CLASSES     = ["red cube", "yellow cube", "block", "card", "cylinder",
+               "toy banana", "toy pear", "tape roll", "chess piece"]   # ← edit freely
+BOX_THRESH  = 0.25
+TEXT_THRESH = 0.20
+INFER_WIDTH = None     # detect-on-demand -> run at FULL 1280 res (better on crowded scenes)
+NMS_IOU     = 0.7      # only merge heavily-overlapping duplicates; keep ADJACENT objects apart
+MATCH_MM    = 35.0     # two detections within this table distance = the same object
+WIDTH, HEIGHT = 1280, 720
+
+ROLES = ["B", "A"]     # left panel = LEFT cam (B), right = RIGHT cam (A)
+PANEL_W, PANEL_H = 640, 360
+
+TEXT_PROMPT = ". ".join(c.lower() for c in CLASSES) + "."
+
+
+def detect_frame(frame, processor, model, device):
+    """Detect on one full-res frame -> list of dicts with box, label, conf, centre.
+    Applies NMS and the strict gray-mat workspace filter (off-mat boxes dropped)."""
+    h, w = frame.shape[:2]
+    ws_mask, _ = gray_mat_mask(frame)
+
+    if INFER_WIDTH and w > INFER_WIDTH:
+        scale = INFER_WIDTH / w
+        infer = cv.resize(frame, (INFER_WIDTH, int(h * scale)))
+    else:
+        scale = 1.0
+        infer = frame
+
+    image = Image.fromarray(cv.cvtColor(infer, cv.COLOR_BGR2RGB))
+    inputs = processor(images=image, text=TEXT_PROMPT, return_tensors="pt").to(device)
+    with torch.no_grad():
+        outputs = model(**inputs)
+    results = processor.post_process_grounded_object_detection(
+        outputs, inputs.input_ids, threshold=BOX_THRESH,
+        text_threshold=TEXT_THRESH, target_sizes=[image.size[::-1]],
+    )[0]
+    labels = results.get("text_labels", results.get("labels"))
+
+    boxes_t, scores_t = results["boxes"], results["scores"]
+    if len(boxes_t) > 0:
+        keep = nms(boxes_t, scores_t, NMS_IOU)
+        boxes_t, scores_t = boxes_t[keep], scores_t[keep]
+        labels = [labels[i] for i in keep.tolist()]
+
+    dets = []
+    for box, score, label in zip(boxes_t, scores_t, labels):
+        x1, y1, x2, y2 = (box / scale).int().tolist()
+        if not box_in_workspace(ws_mask, x1, y1, x2, y2):
+            continue
+        cx, cy = (x1 + x2) / 2.0, (y1 + y2) / 2.0
+        dets.append({"label": str(label), "conf": float(score),
+                     "box": (x1, y1, x2, y2), "px": (cx, cy)})
+    return dets
+
+
+def add_table_xy(dets, intr, extr):
+    """Attach the base-frame (x, y) mm for each detection's box centre."""
+    for d in dets:
+        d["xy"] = pixel_to_table(d["px"][0], d["px"][1], intr, extr)
+    return dets
+
+
+def mark_confirmed(dets_a, dets_b):
+    """Flag each detection 'confirmed' if the OTHER camera has one within MATCH_MM."""
+    def near(d, others):
+        return any(math.hypot(d["xy"][0] - o["xy"][0], d["xy"][1] - o["xy"][1]) <= MATCH_MM
+                   for o in others)
+    for d in dets_a:
+        d["confirmed"] = near(d, dets_b)
+    for d in dets_b:
+        d["confirmed"] = near(d, dets_a)
+
+
+def draw(frame, dets):
+    for d in dets:
+        x1, y1, x2, y2 = d["box"]
+        col = (0, 255, 0) if d.get("confirmed") else (0, 165, 255)   # green / orange
+        cv.rectangle(frame, (x1, y1), (x2, y2), col, 2)
+        cv.circle(frame, (int(d["px"][0]), int(d["px"][1])), 4, col, -1)
+        x, y = d["xy"]
+        tag = f"{d['label']} {d['conf']:.2f} ({x:.0f},{y:.0f})"
+        cv.putText(frame, tag, (x1, y1 - 8), cv.FONT_HERSHEY_SIMPLEX, 0.55, (0, 0, 0), 3)
+        cv.putText(frame, tag, (x1, y1 - 8), cv.FONT_HERSHEY_SIMPLEX, 0.55, col, 1)
+
+
+def _label(img, text, org, color, scale=0.6):
+    cv.putText(img, text, org, cv.FONT_HERSHEY_SIMPLEX, scale, (0, 0, 0), 4)
+    cv.putText(img, text, org, cv.FONT_HERSHEY_SIMPLEX, scale, color, 2 if scale >= 0.6 else 1)
+
+
+def build_canvas(frames, dets, fps, detected_once):
+    canvas = np.zeros((PANEL_H, PANEL_W * 2, 3), np.uint8)
+    for i, r in enumerate(ROLES):
+        disp = cv.resize(frames[r], (PANEL_W, PANEL_H))
+        canvas[0:PANEL_H, i * PANEL_W:(i + 1) * PANEL_W] = disp
+        nconf = sum(d.get("confirmed", False) for d in dets[r])
+        hdr = f"CAM_{r} {calibration.CAMERAS[r]['side']} | {len(dets[r])} det, {nconf} conf"
+        _label(canvas, hdr, (i * PANEL_W + 12, 26), (255, 255, 0))
+    cv.line(canvas, (PANEL_W, 0), (PANEL_W, PANEL_H), (60, 60, 60), 1)
+    hint = "SPACE detect   ENTER save+report   ESC quit"
+    if not detected_once:
+        hint = "press SPACE to detect   |   " + hint
+    _label(canvas, hint, (12, PANEL_H - 12), (255, 255, 255), 0.5)
+    _label(canvas, f"{fps:4.1f} fps", (PANEL_W * 2 - 90, 20), (200, 200, 200), 0.5)
+    return canvas
+
+
+def print_report(dets):
+    print("\n=== cross-verified detections ===")
+    found = False
+    for r in ROLES:
+        for d in dets[r]:
+            found = True
+            x, y = d["xy"]
+            flag = "CONFIRMED" if d.get("confirmed") else "single"
+            print(f"  CAM_{r} {d['label']:<14} {d['conf']:.2f} "
+                  f"({x:7.1f}, {y:7.1f}) mm  [{flag}]")
+    if not found:
+        print("  (none)")
+
+
+def main() -> None:
+    ap = argparse.ArgumentParser(description="Dual-camera detection with cross-verification.")
+    ap.add_argument("--calib-dir", default="calib")
+    ap.add_argument("--model", default="IDEA-Research/grounding-dino-base")
+    args = ap.parse_args()
+
+    device = "cuda" if torch.cuda.is_available() else "cpu"
+    print(f"Loading {args.model} on {device.upper()} ...")
+    processor = AutoProcessor.from_pretrained(args.model)
+    model = AutoModelForZeroShotObjectDetection.from_pretrained(args.model).to(device)
+    model.eval()
+    print("Model ready.")
+
+    calib_dir = pathlib.Path(args.calib_dir)
+    cams, calib = {}, {}
+    for r in ROLES:
+        cams[r] = open_camera(calibration.CAMERAS[r]["name"], width=WIDTH, height=HEIGHT)
+        calib[r] = load_camera(r, calib_dir)   # (intr, extr)
+
+    os.makedirs("Images", exist_ok=True)
+    win = "Dual detection (green=confirmed, orange=single)  |  SPACE detect  ESC quit"
+    cv.namedWindow(win, cv.WINDOW_NORMAL)
+    fps = 0.0
+    last = {"A": [], "B": []}   # most recent detection pass (persists on the live feed)
+    detected_once = False
+
+    try:
+        while True:
+            t0 = time.time()
+            # --- smooth live feed: just grab + show, no inference ---
+            frames = {}
+            for r in ROLES:
+                ok, f = cams[r].read()
+                if not ok or f is None:
+                    f = np.zeros((HEIGHT, WIDTH, 3), np.uint8)
+                    cv.putText(f, f"CAM_{r}: no frame", (40, 80),
+                               cv.FONT_HERSHEY_SIMPLEX, 1.3, (0, 0, 255), 3)
+                frames[r] = f
+            for r in ROLES:
+                draw(frames[r], last[r])   # overlay the last detection pass
+
+            fps = 0.9 * fps + 0.1 * (1.0 / max(time.time() - t0, 1e-3))
+            canvas = build_canvas(frames, last, fps, detected_once)
+            cv.imshow(win, canvas)
+
+            key = cv.waitKey(1) & 0xFF
+            if key == 32:   # SPACE — run one full-res detection pass on both cameras
+                busy = canvas.copy()
+                _label(busy, "DETECTING...", (PANEL_W - 110, PANEL_H // 2), (0, 255, 255), 1.0)
+                cv.imshow(win, busy)
+                cv.waitKey(1)
+                for r in ROLES:
+                    intr, extr = calib[r]
+                    last[r] = add_table_xy(
+                        detect_frame(frames[r], processor, model, device), intr, extr)
+                mark_confirmed(last["A"], last["B"])
+                detected_once = True
+                print_report(last)
+            elif key == 13:   # ENTER — save the view + reprint the last report
+                cv.imwrite(f"Images/dual_{time.strftime('%H%M%S')}.png", canvas)
+                print(f"saved Images/dual_{time.strftime('%H%M%S')}.png")
+                print_report(last)
+            elif key in (27, ord("q")):
+                break
+    finally:
+        for c in cams.values():
+            c.release()
+        cv.destroyAllWindows()
+
+
+if __name__ == "__main__":
+    main()

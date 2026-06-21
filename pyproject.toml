@@ -14,10 +14,13 @@ dependencies = []
 
 [project.optional-dependencies]
 serial = ["pyserial>=3.5"]       # real-arm USB serial port detection
-camera = ["opencv-python>=4.8"]  # the camera sense
+camera = ["opencv-python>=4.8", "pygrabber>=0.2; sys_platform == 'win32'"]  # camera sense (pygrabber = by-name enumeration on Windows)
 brain = ["anthropic>=0.40"]      # the runtime LLM orchestrator
+# Vision (Part B). x64 / macOS / Linux only — torch has no ARM64-Windows wheel
+# (§0.4); kept OUT of base so non-x64 installs don't break.
+vision = ["torch>=2.0", "ultralytics>=8.1"]
 # Physical SO-101 hardware: install separately with `pip install "lerobot[feetech]"`.
-all = ["pyserial>=3.5", "opencv-python>=4.8", "anthropic>=0.40"]
+all = ["pyserial>=3.5", "opencv-python>=4.8", "anthropic>=0.40", "torch>=2.0", "ultralytics>=8.1"]
 
 [tool.setuptools.packages.find]
 include = ["limbic*"]
