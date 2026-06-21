@@ -30,7 +30,11 @@ camera's calibration files). Each camera detects and localizes independently;
 when more than one is configured, an object seen by several cameras is reported
 ONCE, taking the reading from the camera physically CLOSEST to it (computed from
 each camera's calibrated position — so the rule is mounting-agnostic and needs no
-hardcoded left/right). We never average across cameras, per §A.5.
+hardcoded left/right). We never average across cameras, per §A.5. An object both
+cameras confirm is additionally STEREO-FUSED: its two box-centre rays are
+triangulated to a parallax-free ``(x, y)`` and a top-of-object ``height_mm``
+(§B.3), and its footprint is re-measured on that height plane — so coordinates
+stay accurate for objects taller than the mat, which a single z=0 read inflates.
 
 Graceful degradation + self-diagnosis (nothing here ever raises)
 ----------------------------------------------------------------
@@ -238,14 +242,18 @@ def _grab_frame(camera_spec, width: int | None = None, height: int | None = None
 
 def _detect_one_camera(
     spec, role: str, prompt: str, conf: float | None, restrict_to_mat: bool
-) -> tuple[list[dict[str, Any]], str | None]:
-    """Detect + localize on a single camera. Returns ``(objects, error)``.
+) -> tuple[list[dict[str, Any]], str | None, Any, Any]:
+    """Detect + localize on a single camera. Returns ``(objects, error, frame, calib)``.
 
-    Each object dict carries ``camera`` (the role), ``table_mm`` (or None if that
-    camera isn't calibrated), ``size_mm`` (real footprint when calibrated) and,
-    when calibrated, ``_cam_xy`` (the camera's own table-frame position) used by
-    the closest-camera merge. ``_cam_xy`` is stripped before the reading is
-    returned to the model.
+    Each object dict carries ``camera`` (the role), ``table_mm`` (the z=0 read, or
+    None if that camera isn't calibrated), ``size_mm`` (real footprint when
+    calibrated), ``height_mm`` (None here — only stereo fusion can fill it) and two
+    INTERNAL fields, ``_cam_xy`` (the camera's own table-frame position, for the
+    closest-camera merge) and ``_box`` (the pixel box, for re-measuring the
+    footprint on a stereo height plane). Both ``_``-fields are stripped before the
+    reading is returned to the model. ``frame`` (resized to the calibrated space)
+    and ``calib`` ``(intr, extr)`` are returned so the caller can triangulate this
+    camera's box-centre rays against another camera's (parallax-free fusion).
     """
     # Capture at the SAME resolution the intrinsics were calibrated at, so the
     # detected pixels live in the calibration's pixel space and pixel_to_table is
@@ -254,7 +262,7 @@ def _detect_one_camera(
     calib_w, calib_h = _calib_image_size(role)
     frame, cam_err = _grab_frame(spec, width=calib_w, height=calib_h)
     if frame is None:
-        return [], cam_err
+        return [], cam_err, None, None
 
     # Safety net: if the driver refused the requested size, resize to the calibrated
     # size BEFORE detecting so boxes/pixels/segmentation all share that space.
@@ -271,7 +279,7 @@ def _detect_one_camera(
         kw = {} if conf is None else {"conf": float(conf)}
         detections = detector.detect_boxes(frame, prompt, **kw)
     except Exception as exc:
-        return [], f"detection failed on camera {spec!r}: {exc}"
+        return [], f"detection failed on camera {spec!r}: {exc}", frame, None
 
     # Optional workspace (gray-mat) filter — drops anything off the reachable mat.
     mask = None
@@ -328,14 +336,21 @@ def _detect_one_camera(
                 "pixel": [round(u, 1), round(v, 1)],
                 "table_mm": table_mm,
                 "size_mm": size_mm,
+                "height_mm": None,  # filled only by stereo fusion (see _merge_closest_camera)
                 "camera": role,
                 "_cam_xy": cam_xy,
+                "_box": [float(x1), float(y1), float(x2), float(y2)],
             }
         )
-    return objects, None
+    return objects, None, frame, calib
 
 
-def _merge_closest_camera(objects: list[dict[str, Any]], merge_mm: float) -> list[dict[str, Any]]:
+def _merge_closest_camera(
+    objects: list[dict[str, Any]],
+    merge_mm: float,
+    calib_by_role: dict[str, Any] | None = None,
+    frame_by_role: dict[str, Any] | None = None,
+) -> list[dict[str, Any]]:
     """Collapse multi-camera duplicates, keeping the CLOSEST camera's reading (§A.5).
 
     Same-label detections whose table positions fall within ``merge_mm`` are
@@ -343,7 +358,20 @@ def _merge_closest_camera(objects: list[dict[str, Any]], merge_mm: float) -> lis
     camera is physically nearest the object (by calibrated camera position) — we
     never average. Detections without a table coordinate can't be spatially
     matched, so they pass through untouched.
+
+    For any group spanning MORE THAN ONE camera (a cross-verified object), the
+    kept reading is then UPGRADED by stereo triangulation (:func:`_stereo_fix`):
+    its z=0 ``table_mm`` is replaced with a parallax-free ``(x, y)``, ``height_mm``
+    is recovered, and ``size_mm`` is re-measured on the object's own height plane.
+    z=0 over-reads tall objects (the silhouette is the elevated top seen
+    obliquely, §A.7/§B.3), so this is what makes the Brain's coordinate accurate
+    for things taller than the mat. ``calib_by_role``/``frame_by_role`` map each
+    camera role to its ``(intr, extr)`` and captured frame; without them the merge
+    still works, just without the stereo upgrade.
     """
+    calib_by_role = calib_by_role or {}
+    frame_by_role = frame_by_role or {}
+
     located = [o for o in objects if o.get("table_mm") is not None]
     rest = [o for o in objects if o.get("table_mm") is None]
 
@@ -368,15 +396,80 @@ def _merge_closest_camera(objects: list[dict[str, Any]], merge_mm: float) -> lis
         # treat a single-camera sighting (occlusion / glare / false positive)
         # with suspicion.
         winner["confirmed"] = len({o.get("camera") for o in group}) > 1
+        if winner["confirmed"]:
+            _stereo_fix(group, winner, calib_by_role, frame_by_role)
         merged.append(winner)
 
     for o in rest:
         o["confirmed"] = False  # no table coord -> can't cross-match
 
-    # Drop the internal camera-position field before returning to the model.
+    # Drop the internal-only fields before returning to the model.
     for o in merged + rest:
         o.pop("_cam_xy", None)
+        o.pop("_box", None)
     return merged + rest
+
+
+def _stereo_fix(
+    group: list[dict[str, Any]],
+    winner: dict[str, Any],
+    calib_by_role: dict[str, Any],
+    frame_by_role: dict[str, Any],
+) -> bool:
+    """Upgrade a cross-camera group to a parallax-free ``(x, y)`` + height via stereo.
+
+    Triangulates the two box-centre rays from two DIFFERENT cameras (§B.3): the
+    closest-approach midpoint is a position free of the z=0 projection error that
+    shifts tall objects outward, and its z is the object's top height. With the
+    height known, the footprint is re-measured on the object's own plane (top ≈
+    base for vertical sides) instead of z=0. Mutates ``winner`` in place and
+    returns True on success; on any problem (missing calibration, parallel rays)
+    it leaves the winner's z=0 reading untouched and returns False.
+    """
+    # One detection per camera, each needing calibration + a pixel to ray-cast.
+    by_cam: dict[str, dict[str, Any]] = {}
+    for d in group:
+        role = d.get("camera")
+        if role in calib_by_role and d.get("pixel") is not None and role not in by_cam:
+            by_cam[role] = d
+    if len(by_cam) < 2:
+        return False
+
+    (role_a, det_a), (role_b, det_b) = list(by_cam.items())[:2]
+    intr_a, extr_a = calib_by_role[role_a]
+    intr_b, extr_b = calib_by_role[role_b]
+    try:
+        from limbic.vision.sizing import pixel_ray, triangulate
+
+        o_a, dir_a = pixel_ray(det_a["pixel"][0], det_a["pixel"][1], intr_a, extr_a)
+        o_b, dir_b = pixel_ray(det_b["pixel"][0], det_b["pixel"][1], intr_b, extr_b)
+        pt, resid = triangulate(o_a, dir_a, o_b, dir_b)
+    except Exception:
+        return False
+    if pt is None:
+        return False
+
+    height = max(0.0, float(pt[2]))
+    winner["table_mm"] = [round(float(pt[0]), 1), round(float(pt[1]), 1)]
+    winner["height_mm"] = round(height, 1)
+    winner["resid_mm"] = round(float(resid), 1)  # ray gap; large => suspect match/calib
+
+    # Re-measure the footprint on the object's own height plane (drops the z=0
+    # over-read), using the winner camera's frame + calibration when available.
+    wrole = winner.get("camera")
+    frame = frame_by_role.get(wrole)
+    calib = calib_by_role.get(wrole)
+    box = winner.get("_box")
+    if frame is not None and calib is not None and box is not None:
+        try:
+            from limbic.vision.sizing import object_size_mm
+
+            intr, extr = calib
+            long_mm, short_mm = object_size_mm(frame, box, intr, extr, plane_z=height)
+            winner["size_mm"] = [round(long_mm, 1), round(short_mm, 1)]
+        except Exception:
+            pass  # keep the z=0 footprint
+    return True
 
 
 def _pick_closest(group: list[dict[str, Any]]) -> dict[str, Any]:
@@ -413,9 +506,13 @@ class ObjectDetections(Input):
         "object name(s) to look for (comma-separated, e.g. 'red cup, blue block'); "
         "open-vocabulary, so any plain object name works. Returns a list of "
         "{label, confidence, pixel:[u,v], table_mm:[x,y], size_mm:[long,short], "
-        "camera, confirmed} — use table_mm to plan and size_mm to check the object "
-        "fits the gripper; `confirmed` is True when more than one camera agrees on "
-        "the object (trust those; treat single-camera sightings with more caution). "
+        "height_mm, camera, confirmed} — use table_mm to plan and size_mm to check "
+        "the object fits the gripper; `confirmed` is True when more than one camera "
+        "agrees on the object (trust those; treat single-camera sightings with more "
+        "caution). For `confirmed` objects table_mm is parallax-corrected and "
+        "height_mm (top-of-object height above the table, mm) is provided; "
+        "single-camera objects report height_mm null and a table_mm that can read "
+        "slightly outward for tall objects. "
         "Call this FIRST to locate anything you must grasp or move. With no prompt "
         "it returns a health check of the camera(s)/detector/calibration."
     )
@@ -465,11 +562,16 @@ class ObjectDetections(Input):
              "count": <int>,
              "objects": [{"label", "confidence", "pixel": [u, v],
                           "table_mm": [x, y] | None, "size_mm": [long, short] | None,
-                          "camera": <role>, "confirmed": <bool>}, ...],
+                          "height_mm": <float> | None, "camera": <role>,
+                          "confirmed": <bool>, "resid_mm": <float, when stereo>}, ...],
              "note": <str, optional>}
 
         ``size_mm`` is the object's real footprint and ``confirmed`` is True when
-        more than one camera agrees on it (cross-verification, §dual-camera).
+        more than one camera agrees on it (cross-verification, §dual-camera). For a
+        ``confirmed`` object the two cameras' box-centre rays are triangulated, so
+        ``table_mm`` is parallax-free and ``height_mm`` (top height above the table)
+        is filled (with ``resid_mm``, the ray-gap quality flag); a single-camera
+        object keeps its z=0 ``table_mm`` and reports ``height_mm`` None.
 
         With NO prompt, a health check whose ``ok`` is True only when at least one
         camera can produce TABLE-FRAME detections (vision installed + that camera
@@ -525,9 +627,16 @@ class ObjectDetections(Input):
         all_objects: list[dict[str, Any]] = []
         errors: list[str] = []
         roles_used: list[str] = []
+        # Kept per camera so cross-confirmed objects can be triangulated below.
+        frame_by_role: dict[str, Any] = {}
+        calib_by_role: dict[str, Any] = {}
         for spec, role in configs:
-            objs, err = _detect_one_camera(spec, role, prompt, conf, restrict_to_mat)
+            objs, err, frame, calib = _detect_one_camera(spec, role, prompt, conf, restrict_to_mat)
             roles_used.append(role)
+            if frame is not None:
+                frame_by_role[role] = frame
+            if calib is not None:
+                calib_by_role[role] = calib
             if err:
                 errors.append(err)
             all_objects.extend(objs)
@@ -536,13 +645,15 @@ class ObjectDetections(Input):
         if not all_objects and errors:
             return {"ok": False, "error": "; ".join(errors)}
 
-        # With multiple cameras, collapse duplicates to the closest camera (§A.5).
+        # With multiple cameras, collapse duplicates to the closest camera (§A.5)
+        # and stereo-triangulate the cross-confirmed ones (parallax-free x,y + height).
         if len(configs) > 1:
             merge_mm = float(os.environ.get("LIMBIC_CAM_MERGE_MM", "50"))
-            objects = _merge_closest_camera(all_objects, merge_mm)
+            objects = _merge_closest_camera(all_objects, merge_mm, calib_by_role, frame_by_role)
         else:
             for o in all_objects:
                 o.pop("_cam_xy", None)
+                o.pop("_box", None)
                 o["confirmed"] = False  # single camera -> no cross-verification
             objects = all_objects
 
