@@ -141,6 +141,33 @@ def pixel_to_table(
     return float(hit[0]), float(hit[1])
 
 
+def table_to_pixel(
+    x_mm: float,
+    y_mm: float,
+    intr: CameraIntrinsics,
+    extr: CameraExtrinsics,
+    z_mm: float = 0.0,
+) -> tuple[float, float]:
+    """Project a table-frame point ``(x, y, z)`` mm to a pixel ``(u, v)``.
+
+    The inverse of :func:`pixel_to_table`: takes a known base-frame point and
+    finds where it lands in the image (with lens distortion applied). Used to
+    overlay markers — e.g. the gripper's aim point and the +x/+y table axes — on
+    a captured frame so a vision model can reason about table directions.
+    """
+    import cv2
+    import numpy as np
+
+    # extrinsics map camera -> base; cv2.projectPoints wants base -> camera.
+    R_b2c = np.asarray(extr.R_cam2base, dtype=np.float64).T
+    rvec, _ = cv2.Rodrigues(R_b2c)
+    tvec = (-R_b2c @ np.asarray(extr.t_cam2base, dtype=np.float64)).reshape(3, 1)
+    obj = np.array([[[float(x_mm), float(y_mm), float(z_mm)]]], dtype=np.float64)
+    img, _ = cv2.projectPoints(obj, rvec, tvec, intr.camera_matrix, intr.dist_coeffs)
+    u, v = img[0, 0]
+    return float(u), float(v)
+
+
 def load_camera(role: str, calib_dir: str | Path) -> tuple[CameraIntrinsics, CameraExtrinsics]:
     """Load the intrinsics+extrinsics pair for a camera role from ``calib_dir``.
 
