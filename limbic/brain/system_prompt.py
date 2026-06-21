@@ -55,7 +55,12 @@ Hardware grasp + motion rules (this arm, learned the hard way — follow them):
 - PREFER the composite pick and place primitives for grasps: they bake in
   hover -> slow descend -> isolated close -> lift, so you don't have to hand-
   sequence (and risk breaking) these rules. Open before reaching to grasp;
-  release by opening after lowering at the destination."""
+  release by opening after lowering at the destination.
+- For PRECISION grasps of small objects located by the camera, prefer
+  aligned_pick over pick: it stops over the target, takes a screenshot, and uses
+  the vision model to correct the aim by a few mm before grasping — covering for
+  small detector inaccuracy. Pass target_label so it aligns to the right object.
+  It safely falls back to an ordinary grasp when no camera/API is available."""
 
 
 def _format_catalog(

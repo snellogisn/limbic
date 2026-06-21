@@ -19,6 +19,8 @@ but not yet consumed by any primitive.
 from __future__ import annotations
 
 import math
+import os
+import pathlib
 from bisect import bisect_left
 
 from .ik_chain import ACTIVE_JOINTS, geometry
@@ -76,45 +78,46 @@ def arm_to_ikpy_rad(arm_deg: dict[str, float]) -> dict[str, float]:
 
 
 # --------------------------------------------------------------------------- #
-# §5 -- empirical accuracy correction. The real tip lands SHORT and LOW of a
-# raw command under load, so the correction commands HIGHER and FARTHER.
+# §5 -- empirical accuracy correction. The real tip lands SHORT and LOW of the
+# point the IK aims at (slack + gravity droop), so the correction aims FARTHER
+# and HIGHER. Re-fit 2026-06-20 from a move-to-point / ruler sweep on THIS rig,
+# then refined by a hardware ruler check at (160,0,60) [landed (165,0,84)] which
+# pinned down the z slope. The old reach-dropoff table over-corrected z at near
+# reach and under-extended reach -- it's gone, folded into the linear terms.
 #
 # Two functions, opposite directions -- be precise about which one is called:
 #   * command_for_real(real_fwd, real_z, pitch_deg) -- the one to CALL to
-#     move. Pass the desired REAL table position; get back the command to
-#     feed the solver.
-#   * real_for_command(cmd_fwd, cmd_z) -- forward fit, prediction/diagnostic
-#     ONLY (where a raw command lands). Do NOT use this to drive the arm.
+#     move. Pass the desired REAL table position; get back the command (the
+#     "aim") to feed the solver.
+#   * real_for_command(aim_fwd, aim_z) -- forward fit, prediction/diagnostic
+#     ONLY (where a given aim lands). Do NOT use this to drive the arm.
 #
-# Forward fit (real = f(cmd)), table-frame mm, measured at pitch -90:
-#   real_fwd = 1.527*cmd_fwd - 0.279*cmd_z - 124.1
-#   real_z   = 0.637*cmd_z   - 2.42
-# The z slope (0.637 < 1) means a raw command always lands BELOW itself, so
-# command_for_real aims above the target to compensate -- inverting these.
+# Model (table-frame mm, measured at pitch -90, planar reach + z; the planar
+# IK has ~0 model error, so "aim" = where the IK puts the model tip):
+#   aim_fwd = 1.1582*real_fwd + 9.908
+#   aim_z   = 0.7222*real_z   + 28.333
+# Anchored on two careful on-centerline ruler checks -- (150,0,30)->(155,0,30)
+# and (160,0,60)->(165,0,84) -- which pinned the z slope (the noisy first sweep
+# had it ~2x too steep, over-aiming z high); reach also uses two far points for
+# how droop grows with distance (resid <2mm). Reach and z are decoupled here.
 #
-# Reach-dependent z-dropoff: close to the base the tip runs EXTRA low.
-# command_for_real ADDS this to the desired real_z (aim higher) BEFORE
-# inverting the z fit, keyed on the original desired reach (= real_fwd).
+# Pitch blend: the droop is full with the gripper vertical and fades to NONE
+# (aim = real) as it tilts toward horizontal -- we only have vertical data, so
+# identity is the safe default off-vertical. Full at pitch <= -88, none >= -82.
 #
-# Pitch blend (z only -- forward needs none): the droop is full with the
-# gripper vertical and fades as it tilts toward horizontal. Full correction
-# at pitch <= -88, none at >= -82, linear in between.
+# Trust region (measured here -- OUTSIDE it, esp. far/low reach and off-
+# centerline |y|>~100mm, the fit EXTRAPOLATES and is approximate): real fwd
+# ~150-235mm, real z ~30-150mm, near the centerline.
 #
-# Trust region (where this was actually measured, informational only -- not
-# enforced here): real fwd ~120-205mm, real z 0-80mm, |y| <= ~90mm.
-#
-# CONFIRM DIRECTION ON THE FIRST REAL MOVE: command a known target and
-# ruler-check the tip lands AT it, not low/short. If it lands low, this is
-# inverted -- stop and fix before any further real moves.
+# CONFIRM ON THE FIRST REAL MOVE: command a known centerline target and ruler-
+# check the tip lands AT it. If it lands short/low, the sign is wrong -- stop
+# and fix before further moves.
 # --------------------------------------------------------------------------- #
-_REAL_FWD_COEF = (1.527, -0.279, -124.1)   # real_fwd = a*cmd_fwd + b*cmd_z + c
-_REAL_Z_COEF = (0.637, -2.42)              # real_z   = a*cmd_z + b
+_AIM_FWD_COEF = (1.1582, 0.0, 9.908)         # aim_fwd = a*real_fwd + b*real_z + c
+_AIM_Z_COEF = (0.0, 0.7222, 28.333)          # aim_z   = a*real_fwd + b*real_z + c
 
-_DROPOFF_REACH_MM = (50, 60, 70, 80, 90, 95, 100, 110, 120, 130, 145, 160, 170, 180, 260)
-_DROPOFF_ADD_Z_MM = (123, 118, 113, 108, 103, 100, 95, 85, 65, 30, 25, 20, 15, 0, 0)
-
-_PITCH_FULL_DEG = -88.0  # z correction is fully on at/beyond this (vertical)
-_PITCH_NONE_DEG = -82.0  # z correction is fully off at/beyond this
+_PITCH_FULL_DEG = -88.0  # correction is fully on at/beyond this (vertical)
+_PITCH_NONE_DEG = -82.0  # correction is fully off at/beyond this
 
 
 def _interp(xs: tuple[float, ...], ys: tuple[float, ...], x: float) -> float:
@@ -139,33 +142,81 @@ def _z_blend(pitch_deg: float) -> float:
     return (pitch_deg - _PITCH_NONE_DEG) / (_PITCH_FULL_DEG - _PITCH_NONE_DEG)
 
 
+# --------------------------------------------------------------------------- #
+# Fitted accuracy model (data-driven; see accuracy_model.py + calibrate_accuracy).
+# If a fitted model file exists it SUPERSEDES the affine constants below; if not
+# (or it fails to load) we fall back to them. Re-fit with calibrate_accuracy.py,
+# then call reload_accuracy_model() (or restart) to pick it up.
+# --------------------------------------------------------------------------- #
+_ACCURACY_MODEL = None
+_ACCURACY_MODEL_LOADED = False
+
+
+def _accuracy_model_path() -> pathlib.Path:
+    override = os.environ.get("LIMBIC_ACCURACY_MODEL")
+    if override:
+        return pathlib.Path(override)
+    return pathlib.Path(__file__).resolve().parents[2] / "calibration" / "accuracy_model.json"
+
+
+def _get_accuracy_model():
+    global _ACCURACY_MODEL, _ACCURACY_MODEL_LOADED
+    if not _ACCURACY_MODEL_LOADED:
+        _ACCURACY_MODEL_LOADED = True
+        try:
+            from .accuracy_model import AccuracyModel
+
+            _ACCURACY_MODEL = AccuracyModel.load(_accuracy_model_path())
+        except Exception:
+            _ACCURACY_MODEL = None
+    return _ACCURACY_MODEL
+
+
+def reload_accuracy_model():
+    """Force a re-load of the fitted model (call after re-fitting)."""
+    global _ACCURACY_MODEL_LOADED
+    _ACCURACY_MODEL_LOADED = False
+    return _get_accuracy_model()
+
+
 def command_for_real(real_fwd_mm: float, real_z_mm: float, pitch_deg: float = -90.0) -> tuple[float, float]:
-    """(cmd_fwd, cmd_z) to send so the tip lands at REAL (real_fwd, real_z).
+    """(aim_fwd, aim_z) to feed the IK so the tip lands at REAL (real_fwd, real_z).
 
-    This is the one to call when driving the arm. The z droop-correction
-    fades out as the approach tilts away from vertical; forward is robust.
+    This is the one to call when driving the arm. Uses the fitted accuracy model
+    if one is present, else the affine constants below. The droop correction is
+    full with the gripper vertical and fades to identity (aim = real) as the
+    approach tilts toward horizontal (no off-vertical data, so identity default).
     """
-    a_z, b_z = _REAL_Z_COEF
+    model = _get_accuracy_model()
+    if model is not None:
+        return model.command_for_real(real_fwd_mm, real_z_mm, pitch_deg)
+
     f = _z_blend(pitch_deg)
-    real_z_mm = real_z_mm + _interp(_DROPOFF_REACH_MM, _DROPOFF_ADD_Z_MM, real_fwd_mm)
-    cmd_z = f * (real_z_mm - b_z) / a_z + (1.0 - f) * real_z_mm
+    af0, af1, af2 = _AIM_FWD_COEF
+    az0, az1, az2 = _AIM_Z_COEF
+    aim_fwd_full = af0 * real_fwd_mm + af1 * real_z_mm + af2
+    aim_z_full = az0 * real_fwd_mm + az1 * real_z_mm + az2
+    aim_fwd = real_fwd_mm + f * (aim_fwd_full - real_fwd_mm)
+    aim_z = real_z_mm + f * (aim_z_full - real_z_mm)
+    return aim_fwd, aim_z
 
-    a_f, b_f, c_f = _REAL_FWD_COEF
-    cmd_fwd = (real_fwd_mm - b_f * cmd_z - c_f) / a_f
-    return cmd_fwd, cmd_z
 
+def real_for_command(aim_fwd_mm: float, aim_z_mm: float, pitch_deg: float = -90.0) -> tuple[float, float]:
+    """Forward fit: where a given IK aim actually lands (inverse of the §5 map).
 
-def real_for_command(cmd_fwd_mm: float, cmd_z_mm: float, pitch_deg: float = -90.0) -> tuple[float, float]:
-    """Forward fit: where a raw (uncorrected) command actually lands.
-
-    DIAGNOSTIC / PREDICTION ONLY -- never use this to drive the arm.
+    DIAGNOSTIC / PREDICTION ONLY -- never use this to drive the arm. Inverts the
+    full-correction 2x2 affine (the pitch blend is ignored here; diagnostic).
     """
-    a_f, b_f, c_f = _REAL_FWD_COEF
-    a_z, b_z = _REAL_Z_COEF
-    f = _z_blend(pitch_deg)
-    real_fwd = a_f * cmd_fwd_mm + b_f * cmd_z_mm + c_f
-    real_z = f * (a_z * cmd_z_mm + b_z) + (1.0 - f) * cmd_z_mm
-    real_z = real_z - _interp(_DROPOFF_REACH_MM, _DROPOFF_ADD_Z_MM, real_fwd)
+    model = _get_accuracy_model()
+    if model is not None:
+        return model.real_for_command(aim_fwd_mm, aim_z_mm, pitch_deg)
+
+    af0, af1, af2 = _AIM_FWD_COEF
+    az0, az1, az2 = _AIM_Z_COEF
+    det = af0 * az1 - af1 * az0
+    df, dz = aim_fwd_mm - af2, aim_z_mm - az2
+    real_fwd = (az1 * df - af1 * dz) / det
+    real_z = (-az0 * df + af0 * dz) / det
     return real_fwd, real_z
 
 
