@@ -145,6 +145,18 @@ class MinkSO101IK:
             a = self._qadr[j]
             self._seed[a] = min(max(self._seed[a], lo + 1e-4), hi - 1e-4)
 
+        # Self-calibrate the tool's APPROACH AXIS (which way the gripper points) from
+        # the model, so achieved-pitch read-back needs no hardcoded axis convention.
+        # At the downward seed crouch the approach axis is the site's local axis that
+        # points most vertically; its sign is fixed so it points DOWN (z < 0) there
+        # (=> pitch -90 reads "straight down"). Used by :meth:`tool_pitch_deg`.
+        self._data.qpos[:] = self._seed
+        mujoco.mj_kinematics(self._model, self._data)
+        m = self._data.site_xmat[self._tcp_sid]  # 9, row-major 3x3; columns = local axes in world
+        cols = [np.array([m[c], m[3 + c], m[6 + c]]) for c in range(3)]
+        self._approach_col = int(np.argmax([abs(v[2]) for v in cols]))
+        self._approach_sign = -1.0 if cols[self._approach_col][2] > 0 else 1.0
+
     def _q_from_active(self, active_rad: dict[str, float]) -> np.ndarray:
         q = np.zeros(self._model.nq)
         for j, v in active_rad.items():
@@ -205,3 +217,26 @@ class MinkSO101IK:
         mujoco.mj_kinematics(self._model, self._data)
         x_m, y_m, z_m = (float(v) for v in self._data.site_xpos[self._tcp_sid])
         return calibration.ikpy_to_table_mm(x_m, y_m, z_m)
+
+    def tool_pitch_deg(self, arm_deg: dict[str, float]) -> float:
+        """Achieved tool approach pitch (deg) for these joints: -90 = straight down.
+
+        mink solves POSITION-ONLY, so the wrist's tilt is whatever the geometry
+        produced — not the pitch that was asked for. This reads it back from the
+        model (the self-calibrated approach axis) so the caller can compensate for
+        how far the claw overhangs once the wrist is off vertical (the tilt-grasp
+        position fix; see ``calibration.claw_overhang_offset``). z is shared between
+        the base and table frames, so the pitch is frame-independent.
+        """
+        import numpy as np
+
+        mujoco = self._mujoco
+        rad = calibration.arm_to_ikpy_rad({j: arm_deg[j] for j in ACTIVE_JOINTS})
+        self._data.qpos[:] = 0.0
+        for j in ACTIVE_JOINTS:
+            self._data.qpos[self._qadr[j]] = rad[j]
+        mujoco.mj_kinematics(self._model, self._data)
+        m = self._data.site_xmat[self._tcp_sid]
+        c = self._approach_col
+        a = self._approach_sign * np.array([m[c], m[3 + c], m[6 + c]])
+        return float(np.degrees(np.arctan2(a[2], np.hypot(a[0], a[1]))))

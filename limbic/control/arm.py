@@ -224,6 +224,10 @@ class RobotArm:
             requested={"x_mm": x_mm, "y_mm": y_mm, "z_mm": z_mm, "pitch_deg": approach_pitch_deg},
             target={"x_mm": round(cx, 2), "y_mm": round(cy, 2), "z_mm": round(cz, 2)},
             achieved={"x_mm": round(achieved[0], 2), "y_mm": round(achieved[1], 2), "z_mm": round(achieved[2], 2)},
+            # The pitch the wrist ACTUALLY reached (mink tilts as it reaches out).
+            # When it's off -90 the IK pulled the target in to cancel the claw
+            # overhang so the claw — not the bare tip — lands on the point.
+            achieved_pitch_deg=round(solution.achieved_pitch_deg, 1),
             clamped=was_clamped,
             reachable=solution.reachable,
             slow=slow,

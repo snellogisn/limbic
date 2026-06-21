@@ -50,6 +50,15 @@ _USING_MINK = False
 _MINK_FWD_BIAS_MM = float(os.environ.get("LIMBIC_FWD_BIAS_MM", "50.0"))
 _MINK_Z_BIAS_MM = float(os.environ.get("LIMBIC_Z_BIAS_MM", "0.0"))
 
+# Wrist-TILT position fix: mink solves position-only, so the gripper tilts as it
+# reaches out, and the claw then overhangs the IK tip horizontally (calibration.
+# claw_overhang_offset). We read the achieved tilt back and re-solve a couple of
+# times so the CLAW — not the bare tip — lands on the target. A few iterations
+# converge (each reach nudge only slightly changes the tilt); below the tolerance
+# we stop. No-op when the claw overhang is 0 (unmeasured) or the wrist is vertical.
+_CLAW_COMP_ITERS = 3
+_CLAW_COMP_TOL_MM = 0.5
+
 
 def _engine():
     """Return the reaching-IK engine, building it once on first call."""
@@ -93,6 +102,12 @@ class IKSolution:
 
     joints: dict[str, float]  # {joint_name: degrees} for the 5 arm joints
     reachable: bool           # False => outside reach or no in-limits pose existed
+    # The tool pitch the solution ACTUALLY achieves (deg; -90 = straight down).
+    # mink tilts the wrist as it reaches out, so this is the realised angle, not the
+    # requested one — used to compensate the claw overhang (the tilt-grasp fix) and
+    # available to callers that want to know the true approach. Equals the requested
+    # pitch on the closed-form planar solver (which controls pitch directly).
+    achieved_pitch_deg: float = -90.0
 
 
 def solve_ik(
@@ -118,37 +133,66 @@ def solve_ik(
     reach_mm = math.hypot(x_mm, y_mm)
 
     eng = _engine()
-    if _USING_MINK:
-        # mink kinematics, with the rig's MEASURED z-droop compensation only:
-        # forward is left raw (it lands within ~1 cm on this arm), but the tip sags
-        # under gravity in z, so we aim higher in z via the measured fit. (Verified:
-        # the fit predicts ~0 mm tip height at a raw z=50 command, matching the
-        # observed "tip on the table".) Forward's separate fit is NOT used -- it was
-        # tuned to the old solver and disagrees with mink's forward reach.
-        cmd_reach = reach_mm + _MINK_FWD_BIAS_MM
-        _, cmd_z = calibration.command_for_real(reach_mm, z_mm + _MINK_Z_BIAS_MM, approach_pitch_deg)
-    else:
-        # Closed-form path: turn the desired REAL position into the command to send.
-        cmd_reach, cmd_z = calibration.command_for_real(reach_mm, z_mm, approach_pitch_deg)
 
-    def _solve_at(radius_mm: float) -> dict[str, float] | None:
+    def _solve_at(radius_mm: float, cmd_z: float) -> dict[str, float] | None:
         b = eng.solve(
             radius_mm * math.cos(azimuth), radius_mm * math.sin(azimuth), cmd_z, approach_pitch_deg
         )
         return None if b is None else {j: float(b[i]) for i, j in enumerate(ACTIVE_JOINTS)}
 
-    joints = _solve_at(cmd_reach)
+    def _command_for(real_reach: float, real_z: float) -> tuple[float, float]:
+        """(cmd_reach, cmd_z) to feed the solver so the IK TIP lands at real (reach, z)."""
+        if _USING_MINK:
+            # mink kinematics, with the rig's MEASURED z-droop compensation only:
+            # forward is left raw (it lands within ~1 cm on this arm), but the tip
+            # sags under gravity in z, so we aim higher in z via the measured fit.
+            # Forward's separate fit is NOT used -- it was tuned to the old solver.
+            _, cmd_z = calibration.command_for_real(real_reach, real_z + _MINK_Z_BIAS_MM, approach_pitch_deg)
+            return real_reach + _MINK_FWD_BIAS_MM, cmd_z
+        # Closed-form path: turn the desired REAL position into the command to send.
+        return calibration.command_for_real(real_reach, real_z, approach_pitch_deg)
+
+    # First pass: aim the IK TIP at the requested point.
+    real_reach, real_z = reach_mm, z_mm
+    cmd_reach, cmd_z = _command_for(real_reach, real_z)
+    joints = _solve_at(cmd_reach, cmd_z)
+    achieved_pitch = approach_pitch_deg
+
+    # WRIST-TILT POSITION FIX (mink only): mink lets the wrist tilt as it reaches,
+    # and the claw then overhangs the IK tip horizontally — so a tip aimed at the
+    # block lands the CLAW beyond it. Read the achieved tilt back and pull the TARGET
+    # in by the claw overhang, re-solving until it settles, so the CLAW hits the
+    # block. All terms are 0 at top-down, so a vertical grasp is unchanged. The
+    # planar solver controls pitch directly, so it needs no read-back.
+    if joints is not None and _USING_MINK:
+        achieved_pitch = eng.tool_pitch_deg(joints)
+        for _ in range(_CLAW_COMP_ITERS):
+            d_reach, d_z = calibration.claw_overhang_offset(achieved_pitch)
+            if abs(d_reach) <= _CLAW_COMP_TOL_MM and abs(d_z) <= _CLAW_COMP_TOL_MM:
+                break
+            real_reach, real_z = reach_mm - d_reach, z_mm - d_z
+            cmd_reach, cmd_z = _command_for(real_reach, real_z)
+            adjusted = _solve_at(cmd_reach, cmd_z)
+            if adjusted is None:  # the inward nudge went unreachable -> keep last good
+                break
+            joints = adjusted
+            achieved_pitch = eng.tool_pitch_deg(joints)
+
     reachable = joints is not None
     if joints is None:  # out of reach -> clamp inward to the nearest feasible radius
         for scale in (0.95, 0.9, 0.85, 0.8, 0.7, 0.6, 0.5):
-            joints = _solve_at(cmd_reach * scale)
+            joints = _solve_at(cmd_reach * scale, cmd_z)
             if joints is not None:
+                if _USING_MINK:
+                    achieved_pitch = eng.tool_pitch_deg(joints)
                 break
     if joints is None:  # still unreachable -> safe neutral pose, flagged unreachable
-        return IKSolution(joints={j: 0.0 for j in ACTIVE_JOINTS}, reachable=False)
+        return IKSolution(joints={j: 0.0 for j in ACTIVE_JOINTS}, reachable=False,
+                          achieved_pitch_deg=approach_pitch_deg)
 
     in_limits_ok = all(within_limits(j, joints[j]) for j in ARM_JOINTS)
-    return IKSolution(joints=joints, reachable=reachable and in_limits_ok)
+    return IKSolution(joints=joints, reachable=reachable and in_limits_ok,
+                      achieved_pitch_deg=achieved_pitch)
 
 
 def forward_kinematics(joints: dict[str, float]) -> tuple[float, float, float]:

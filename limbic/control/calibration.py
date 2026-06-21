@@ -254,6 +254,52 @@ def claw_back_off_mm(reach_mm: float) -> float:
 
 
 # --------------------------------------------------------------------------- #
+# Claw overhang past the IK tip (the wrist-TILT position fix).
+#
+# The IK solves for the gripper_frame_link tool point ("the IK tip"). The part
+# that actually closes on the object — the claw contact point — sits a fixed
+# distance FURTHER ALONG THE TOOL APPROACH AXIS than that tip. When the gripper is
+# vertical (top-down, pitch -90) that overhang is purely DOWNWARD, so it only shows
+# up in z (already absorbed by the base-height / grasp-depth calibration). But when
+# the wrist TILTS off vertical, the same overhang projects HORIZONTALLY: the claw
+# lands  CLAW_TIP_AHEAD_MM * cos(pitch)  further out in reach (and higher in z by
+# CLAW_TIP_AHEAD_MM * (1 + sin(pitch))) than the IK tip. That uncompensated reach
+# overshoot is why a tilted grasp misses the block — the arm aims its tip at the
+# block, but the claw closes beyond it.
+#
+# ``claw_overhang_offset(pitch_deg)`` returns the (d_reach, d_z) the claw lands
+# AHEAD OF / ABOVE the IK tip RELATIVE TO TOP-DOWN, so the IK can pre-shift the
+# target by exactly that and land the CLAW (not the bare tip) on the block. Both
+# terms are 0 at pitch -90, so this never changes the (already-calibrated) top-down
+# grasp — it only kicks in as the wrist tilts.
+#
+# MEASURE ON THIS RIG (it's a hardware length): command a grasp that the solver
+# reaches at a known tilt, ruler how far PAST the target the claw closes, and set
+#   CLAW_TIP_AHEAD_MM = overshoot_mm / cos(achieved_pitch)
+# Tune live via $LIMBIC_CLAW_TIP_AHEAD_MM without editing code. Default 0.0 keeps
+# the correction OFF until measured (a wrong baked-in length is worse than none).
+# --------------------------------------------------------------------------- #
+CLAW_TIP_AHEAD_MM = float(os.environ.get("LIMBIC_CLAW_TIP_AHEAD_MM", "0.0"))
+
+
+def claw_overhang_offset(pitch_deg: float, claw_tip_ahead_mm: float | None = None) -> tuple[float, float]:
+    """(d_reach, d_z) the claw contact lands ahead-of / above the IK tip vs. top-down.
+
+    Pitch convention: -90 = straight down. Returns (0, 0) at -90 (top-down), so the
+    caller can always subtract these from the target with no effect on a vertical
+    grasp. ``d_reach`` grows as the wrist tilts toward horizontal; subtract it from
+    the commanded reach to cancel the tilt overshoot that makes a grasp miss.
+    """
+    L = CLAW_TIP_AHEAD_MM if claw_tip_ahead_mm is None else claw_tip_ahead_mm
+    if not L:
+        return 0.0, 0.0
+    p = math.radians(pitch_deg)
+    d_reach = L * math.cos(p)            # 0 at -90, grows as it tilts out
+    d_z = L * (1.0 + math.sin(p))        # 0 at -90 (sin(-90) = -1)
+    return d_reach, d_z
+
+
+# --------------------------------------------------------------------------- #
 # §7 -- push / stack / knock-off / throw. Stage 4 territory: not yet wired.
 # --------------------------------------------------------------------------- #
 PUSH_BEHIND_MM = 35.0
