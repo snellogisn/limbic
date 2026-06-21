@@ -51,6 +51,19 @@ Hardware grasp + motion rules (this arm, learned the hard way — follow them):
 - Lift before retract: after closing on an object, lift straight up first, THEN
   move laterally. Dragging sideways at grasp height knocks things over. On a
   place, lower and open BEFORE lifting away.
+- Drop from ABOVE — do NOT push the held object down into the surface it lands on.
+  The held object's bottom sits ~1 cm BELOW the claw tip, so to set it on a surface
+  of height H the tip should release at about H + 1.5 cm (~1 cm of object-below-claw
+  + ~0.5 cm clearance). Stacking a 2.5 cm cube on another 2.5 cm cube → release the
+  tip at ~4 cm; placing on the bare table → ~1.5 cm. Use `place` and set
+  `support_height_mm` to the height of the surface you're placing ONTO (0 for the
+  table, ~25 mm to stack on a cube) — it computes the release height for you. It is
+  better to drop from slightly too high than to ram the lower object.
+- Prefer TOP-DOWN picks: grasp straight down (gripper pointing down, wrist roll at
+  or near 90 deg) — that is the most accurate and is the default. Only let the wrist
+  tilt / its roll change at FAR reach positions where a clean top-down genuinely
+  can't be reached; keep precise grasps near the workspace centre and don't tilt
+  unless distance forces it.
 - Use the arm's full reach: it can tilt/extend to reach far targets — prefer a
   reachable plan over declaring a target impossible, but keep precise top-down
   grasps near the workspace centre where IK is strongest.
