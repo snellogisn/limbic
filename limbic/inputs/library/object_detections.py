@@ -64,6 +64,21 @@ from limbic.inputs.base import Input
 _REPO_ROOT = pathlib.Path(__file__).resolve().parents[3]
 
 
+def _camera_offset_mm() -> tuple[float, float]:
+    """Constant table-frame correction added to EVERY camera-derived (x, y) (mm).
+
+    Measured on the rig: the localized camera coordinate reads ~15 mm too far
+    FORWARD of where the arm actually reaches it (a camera coordinate of 250 mm is
+    the arm's 235 mm), so we subtract 15 mm in +x by default. This only shifts
+    coordinates that come from the camera — typed coordinates and the object-size
+    geometry are untouched. Override per axis with ``$LIMBIC_CAM_OFFSET_X_MM`` /
+    ``$LIMBIC_CAM_OFFSET_Y_MM`` (re-measure if the rig moves).
+    """
+    dx = float(os.environ.get("LIMBIC_CAM_OFFSET_X_MM", "-15.0"))
+    dy = float(os.environ.get("LIMBIC_CAM_OFFSET_Y_MM", "0.0"))
+    return dx, dy
+
+
 def _calib_dir() -> pathlib.Path:
     """Directory holding the camera calibration .npz files.
 
@@ -309,6 +324,11 @@ def _detect_one_camera(
                 from limbic.control.localization import pixel_to_table
 
                 x_mm, y_mm = pixel_to_table(u, v, intr, extr)
+                # Measured camera->arm correction (e.g. -15 mm forward). Applied
+                # here, before merge/closest-camera, so every reported target the
+                # brain commands is in the arm's frame.
+                off_x, off_y = _camera_offset_mm()
+                x_mm, y_mm = x_mm + off_x, y_mm + off_y
                 table_mm = [round(x_mm, 1), round(y_mm, 1)]
             except Exception:
                 table_mm = None  # ray/extrinsics issue — keep the pixel, drop coord
