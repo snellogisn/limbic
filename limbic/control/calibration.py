@@ -300,6 +300,56 @@ def claw_overhang_offset(pitch_deg: float, claw_tip_ahead_mm: float | None = Non
 
 
 # --------------------------------------------------------------------------- #
+# Good "pick zone": where a clean TOP-DOWN grasp is accurate on this rig, and the
+# staging target to push an object INTO it before grasping.
+#
+# Top-down grasps are precise only in an inner reach band near the centerline
+# (§A.6/§A.7): reach too far and the wrist must TILT (degrading the grasp — the
+# whole reason for the tilt fix); stray too far off the centerline and a not-quite-
+# level base rides the tip high. So when a detected object sits OUTSIDE this zone,
+# the better move is to PUSH it in first, then grasp it where the arm is strongest.
+#
+# ``in_pick_zone(x, y)`` answers "is it already well placed?"; ``pick_staging_target
+# (x, y)`` returns the NEAREST point inside the zone — the minimal push that makes
+# the object optimally pickable (small nudge, not a haul across the table). Bounds
+# are tunable live ($LIMBIC_PICK_REACH_MIN_MM / _MAX_MM / _Y_MAX_MM) to match the
+# rig without code edits.
+# --------------------------------------------------------------------------- #
+PICK_ZONE_REACH_MIN_MM = float(os.environ.get("LIMBIC_PICK_REACH_MIN_MM", "130.0"))
+PICK_ZONE_REACH_MAX_MM = float(os.environ.get("LIMBIC_PICK_REACH_MAX_MM", "230.0"))
+PICK_ZONE_Y_MAX_MM = float(os.environ.get("LIMBIC_PICK_Y_MAX_MM", "80.0"))
+
+
+def in_pick_zone(x_mm: float, y_mm: float) -> bool:
+    """True if ``(x, y)`` is in the band where a clean top-down grasp is accurate."""
+    reach = math.hypot(x_mm, y_mm)
+    return (
+        PICK_ZONE_REACH_MIN_MM <= reach <= PICK_ZONE_REACH_MAX_MM
+        and abs(y_mm) <= PICK_ZONE_Y_MAX_MM
+    )
+
+
+def pick_staging_target(x_mm: float, y_mm: float) -> tuple[float, float]:
+    """Nearest point in the good pick zone to ``(x, y)`` — the minimal repositioning push.
+
+    Pulls the object radially to the reach band (in if too far, out if too close)
+    and caps its lateral offset toward the centerline, keeping the result reachable.
+    Returns ``(x, y)`` already in the zone (so ``in_pick_zone`` is then True).
+    """
+    reach = math.hypot(x_mm, y_mm)
+    if reach < 1e-6:
+        return PICK_ZONE_REACH_MIN_MM, 0.0
+    target_reach = min(max(reach, PICK_ZONE_REACH_MIN_MM), PICK_ZONE_REACH_MAX_MM)
+    # Move radially (same heading) to the target reach.
+    tx, ty = x_mm * target_reach / reach, y_mm * target_reach / reach
+    # Cap the lateral offset toward the centerline, then restore forward reach.
+    if abs(ty) > PICK_ZONE_Y_MAX_MM:
+        ty = math.copysign(PICK_ZONE_Y_MAX_MM, ty)
+        tx = math.sqrt(max(target_reach ** 2 - ty ** 2, 0.0))
+    return tx, ty
+
+
+# --------------------------------------------------------------------------- #
 # §7 -- push / stack / knock-off / throw. Stage 4 territory: not yet wired.
 # --------------------------------------------------------------------------- #
 PUSH_BEHIND_MM = 35.0

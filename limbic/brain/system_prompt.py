@@ -69,6 +69,15 @@ Hardware grasp + motion rules (this arm, learned the hard way — follow them):
 - Use the arm's full reach: it can tilt/extend to reach far targets — prefer a
   reachable plan over declaring a target impossible, but keep precise top-down
   grasps near the workspace centre where IK is strongest.
+- REPOSITION a badly-placed object BEFORE grasping it. A clean top-down grasp is
+  accurate only in an inner band near the centre; an object that is too far out or
+  too far off to the side will only get a degraded, tilted grasp where it lies. So
+  when a camera-located object you must pick sits in a poor spot, FIRST push it into
+  the sweet spot with `reposition_for_pick` (give it the object's current x, y) —
+  it no-ops if the object is already well placed, and otherwise nudges it the
+  minimum needed. Pushing MOVES the object, so this is an act-then-see step: after
+  reposition_for_pick, call sense_object_detections AGAIN to read the object's NEW
+  position, then pick it there. Don't reuse the pre-push coordinate.
 - Tracing / drawing happens on the HORIZONTAL plane: treat a constant-z plane as a
   sheet of paper lying flat on the table and draw on it from above. Vary x and y to
   draw the shape while holding z FIXED, tool pointing straight down (pitch -90) like
