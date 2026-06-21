@@ -21,18 +21,59 @@ Units: millimetres for position, degrees for joint angles (arm convention).
 from __future__ import annotations
 
 import math
+import os
 from dataclasses import dataclass
 
 from . import calibration
 from .ik_chain import ACTIVE_JOINTS
 from .ik_chain import fk as _ikpy_fk
 from .safety import ARM_JOINTS, within_limits
-from ._prep_planar_ik import PlanarSO101IK
 
-# Hardware-validated closed-form planar IK engine (loads the URDF chain once).
-# It takes a table-frame command and returns arm-convention degrees directly --
-# pan/azimuth and the table<->arm frame handling all live inside it.
-_PREP_IK = PlanarSO101IK()
+# ------------------------------------------------------------------------- #
+# Reaching-IK engine. Default = mink (MuJoCo): an open-source differential-IK
+# solver verified on this rig (FK->IK 0.0008 mm, MuJoCo-vs-ikpy frame 0.0000 mm).
+# The closed-form planar solver is kept only as an explicit fallback
+# (LIMBIC_IK=planar). Both expose ``.solve(x_mm, y_mm, z_mm, pitch_deg) -> deg[5]``
+# in ACTIVE_JOINTS order, so the rest of this module is engine-agnostic.
+#
+# The engine is built lazily on first use so importing ``limbic.control`` never
+# requires mujoco/mink (preserving the arch-split: arm code imports anywhere).
+# ------------------------------------------------------------------------- #
+_ENGINE = None
+_USING_MINK = False
+
+# Live-tuned droop biases for the mink path (this rig, wrist_roll locked). The arm
+# sags under gravity: the tip lands SHORT in reach and LOW in z, so we command a
+# bit farther + higher. Seeded from ruler measurements; refine at the rig via
+# $LIMBIC_FWD_BIAS_MM / $LIMBIC_Z_BIAS_MM. (The reach-dependent z fit in
+# ``calibration.command_for_real`` does the bulk of z; Z_BIAS is the final trim.)
+_MINK_FWD_BIAS_MM = float(os.environ.get("LIMBIC_FWD_BIAS_MM", "50.0"))
+_MINK_Z_BIAS_MM = float(os.environ.get("LIMBIC_Z_BIAS_MM", "0.0"))
+
+
+def _engine():
+    """Return the reaching-IK engine, building it once on first call."""
+    global _ENGINE, _USING_MINK
+    if _ENGINE is not None:
+        return _ENGINE
+    pref = os.environ.get("LIMBIC_IK", "mink").lower()
+    if pref != "planar":
+        try:
+            from .mink_ik import MinkSO101IK
+            _ENGINE = MinkSO101IK()
+            _USING_MINK = True
+            return _ENGINE
+        except Exception as exc:  # mink/mujoco absent or model failed -> fall back
+            import warnings
+            warnings.warn(
+                f"mink IK unavailable ({exc!r}); falling back to the closed-form "
+                "planar solver. Set LIMBIC_IK=planar to silence this.",
+                RuntimeWarning, stacklevel=2,
+            )
+    from ._prep_planar_ik import PlanarSO101IK
+    _ENGINE = PlanarSO101IK()
+    _USING_MINK = False
+    return _ENGINE
 
 
 @dataclass(frozen=True)
@@ -65,11 +106,22 @@ def solve_ik(
     azimuth = math.atan2(y_mm, x_mm)
     reach_mm = math.hypot(x_mm, y_mm)
 
-    # Empirical correction: turn the desired REAL position into the command to send.
-    cmd_reach, cmd_z = calibration.command_for_real(reach_mm, z_mm, approach_pitch_deg)
+    eng = _engine()
+    if _USING_MINK:
+        # mink kinematics, with the rig's MEASURED z-droop compensation only:
+        # forward is left raw (it lands within ~1 cm on this arm), but the tip sags
+        # under gravity in z, so we aim higher in z via the measured fit. (Verified:
+        # the fit predicts ~0 mm tip height at a raw z=50 command, matching the
+        # observed "tip on the table".) Forward's separate fit is NOT used -- it was
+        # tuned to the old solver and disagrees with mink's forward reach.
+        cmd_reach = reach_mm + _MINK_FWD_BIAS_MM
+        _, cmd_z = calibration.command_for_real(reach_mm, z_mm + _MINK_Z_BIAS_MM, approach_pitch_deg)
+    else:
+        # Closed-form path: turn the desired REAL position into the command to send.
+        cmd_reach, cmd_z = calibration.command_for_real(reach_mm, z_mm, approach_pitch_deg)
 
     def _solve_at(radius_mm: float) -> dict[str, float] | None:
-        b = _PREP_IK.solve(
+        b = eng.solve(
             radius_mm * math.cos(azimuth), radius_mm * math.sin(azimuth), cmd_z, approach_pitch_deg
         )
         return None if b is None else {j: float(b[i]) for i, j in enumerate(ACTIVE_JOINTS)}
@@ -97,6 +149,9 @@ def forward_kinematics(joints: dict[str, float]) -> tuple[float, float, float]:
     compensates for real-world droop that this model doesn't otherwise know
     about; it only ever biases the command, never the read-back interpretation.
     """
+    eng = _engine()
+    if _USING_MINK:
+        return eng.fk({j: joints[j] for j in ACTIVE_JOINTS})
     ikpy_rad = calibration.arm_to_ikpy_rad({j: joints[j] for j in ACTIVE_JOINTS})
     x_m, y_m, z_m = _ikpy_fk(ikpy_rad)
     return calibration.ikpy_to_table_mm(x_m, y_m, z_m)
