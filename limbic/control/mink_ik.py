@@ -62,7 +62,7 @@ LOCKED_WRIST_ROLL_DEG = float(os.environ.get("LIMBIC_WRIST_ROLL_DEG", "-6.46"))
 
 # ===================== REVERT POINT (pin wrist TILT at -90) =====================
 # CHANGED 2026-06-21 (per Part A): drive wrist_flex (the wrist TILT) to its DOWN
-# extreme for top-down grasps and KEEP it there. -90 arm deg = gripper pointing
+# extreme for top-down grasps and KEEP it there. +90 arm deg = gripper pointing
 # straight down on this rig (measured in calibration). The solve pins wrist_flex at
 # this value (so the approach is vertical); only if a target can't be reached with
 # the wrist vertical does it RELAX wrist_flex to its full range and re-solve — then,
@@ -71,7 +71,7 @@ LOCKED_WRIST_ROLL_DEG = float(os.environ.get("LIMBIC_WRIST_ROLL_DEG", "-6.46"))
 # to the prior position-only behaviour; or set the default below back to "0"/remove.
 # Tune the down value with LIMBIC_WRIST_TILT_DEG. Tag: ik-good-pre-wristtilt90.
 # ===============================================================================
-LOCKED_WRIST_TILT_DEG = float(os.environ.get("LIMBIC_WRIST_TILT_DEG", "-90.0"))
+LOCKED_WRIST_TILT_DEG = float(os.environ.get("LIMBIC_WRIST_TILT_DEG", "90.0"))
 PIN_WRIST_TILT = os.environ.get("LIMBIC_PIN_WRIST_TILT", "1").strip().lower() in ("1", "true", "on", "yes")
 
 # Accept tolerance for "reached the point". Mid-workspace solves land < 2 mm;
