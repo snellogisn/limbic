@@ -9,11 +9,13 @@ The mirror image of ``pick``. It assumes the claw is already holding an object
   2. Lower slowly to the release height, using the precision profile for a gentle
      set-down. The release height is computed to DROP FROM ABOVE, not to push the
      held object down into whatever it lands on (§0.6): the held object's bottom
-     sits ~1 cm BELOW the claw tip, so to set it on a surface of height H the tip
-     releases at about ``H + drop_offset_mm`` (~1.5 cm of object-below-claw plus a
-     small clearance). E.g. stacking a 2.5 cm cube on another → support_height_mm
-     25, tip releases at ~40 mm; on the bare table → ~15 mm. Better to drop from a
-     touch too high than to ram the lower object.
+     sits ~1 cm BELOW the claw tip, and we drop from ~1.5 cm above the surface, so
+     to set it on a surface of height H the tip releases at about ``H +
+     drop_offset_mm`` (~1 cm object-below-claw + ~1.5 cm clearance = ~2.5 cm).
+     ACCOUNT FOR THE CUBE HEIGHT underneath: each cube is 2.5 cm, so support_height_mm
+     is 0 on the table, ~25 on one cube, ~50 on a stack of two. E.g. stacking a 2.5 cm
+     cube on another → support_height_mm 25, tip releases at ~50 mm; on the bare table
+     → ~25 mm. Better to drop from a touch too high than to ram the lower object.
   3. Open the claw to release.
   4. Retreat back up to the carry height before the next move — opening *then*
      lifting (rather than lifting while still gripping) leaves the object settled
@@ -49,18 +51,19 @@ class Place(Primitive):
         },
         "support_height_mm": {
             "type": "number",
-            "description": "Height of the surface you are setting the object ONTO (mm): "
-            "0 for the table, ~25 to stack on a 2.5 cm cube. The release height is "
-            "computed from this so the object drops from just above the surface "
+            "description": "Height of the surface you are setting the object ONTO (mm). "
+            "ACCOUNT FOR CUBE HEIGHT: each cube is 2.5 cm, so this is 0 for the bare "
+            "table, ~25 to stack on one cube, ~50 on a stack of two, etc. The release "
+            "height is computed from this so the object drops from above the surface "
             "instead of being pushed into it. Default 0 (the table).",
             "default": 0.0,
         },
         "drop_offset_mm": {
             "type": "number",
             "description": "How far ABOVE the support the claw tip releases (mm): the "
-            "held object's bottom sits ~1 cm below the tip, plus ~0.5 cm clearance so "
-            "it drops rather than pushes down. Default 15.",
-            "default": 15.0,
+            "held object's bottom sits ~1 cm below the tip, plus ~1.5 cm clearance so "
+            "it drops cleanly from above rather than pushing down. Default 25.",
+            "default": 25.0,
         },
         "release_z_mm": {
             "type": "number",
@@ -82,7 +85,7 @@ class Place(Primitive):
         x_mm: float,
         y_mm: float,
         support_height_mm: float = 0.0,
-        drop_offset_mm: float = 15.0,
+        drop_offset_mm: float = 25.0,
         release_z_mm: float | None = None,
         carry_z_mm: float = 70.0,
         **kwargs: Any,
