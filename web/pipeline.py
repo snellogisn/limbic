@@ -48,15 +48,21 @@ if os.environ.get("LIMBIC_BACKEND", "auto").lower() == "mock":
     os.environ.setdefault("LIMBIC_SLOW_DT", "0.001")
     os.environ.setdefault("LIMBIC_GRIPPER_SETTLE", "0.02")
 else:
-    # Real (or auto) hardware: SLOW *and* SMOOTH. The slowness comes from a tiny
-    # per-step increment, NOT from long pauses — commands still stream at ~50 Hz,
-    # so the servo glides continuously instead of snapping-then-waiting (the jerk).
-    # Speed ≈ step/dt: 0.25 deg / 0.02 s ≈ 12 deg/s transit, finer/slower for grasps.
-    os.environ.setdefault("LIMBIC_SMOOTH_STEP", "0.25")    # tiny step = slow but smooth
-    os.environ.setdefault("LIMBIC_SMOOTH_DT", "0.02")      # keep the ~50 Hz stream
-    os.environ.setdefault("LIMBIC_SLOW_STEP", "0.15")      # precision moves: finer + slower
-    os.environ.setdefault("LIMBIC_SLOW_DT", "0.02")
+    # Real (or auto) hardware: SLOW *and* SMOOTH. Smoothness here is a SERIAL-BUS
+    # problem, not just a math one. Tiny steps at ~50 Hz flood the Feetech bus
+    # (6 motor writes per step => ~300 writes/s), and the irregular timing of a
+    # saturated bus is itself the jerk. Direct hand-driven picks on THIS arm were
+    # smooth at ~1.0 deg steps (~12-25 Hz, comfortable for the bus) with no extra
+    # tuning — so we use bus-friendly steps and get the slowness from dt, not from
+    # shrinking the step. Speed ≈ step/dt.
+    os.environ.setdefault("LIMBIC_SMOOTH_STEP", "1.0")     # bus-friendly step (~25 Hz stream)
+    os.environ.setdefault("LIMBIC_SMOOTH_DT", "0.04")      # transit ≈ 25 deg/s — slow + smooth
+    os.environ.setdefault("LIMBIC_SLOW_STEP", "1.0")       # precision: same proven-smooth step ...
+    os.environ.setdefault("LIMBIC_SLOW_DT", "0.06")        # ... slower (≈ 17 deg/s) for contact moves
     os.environ.setdefault("LIMBIC_GRIPPER_SETTLE", "0.7")
+    # If any residual per-setpoint jerk remains, the next lever is the servo's own
+    # Acceleration register (backends.py _apply_servo_acceleration) via
+    # LIMBIC_SERVO_ACCEL — a hardware value to tune live, left UNSET here on purpose.
 
 from limbic import RobotArm, runlog  # noqa: E402
 from limbic.control import safety  # noqa: E402
