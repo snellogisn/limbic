@@ -67,11 +67,12 @@ _REPO_ROOT = pathlib.Path(__file__).resolve().parents[3]
 def _calib_dir() -> pathlib.Path:
     """Directory holding the camera calibration .npz files.
 
-    ``$LIMBIC_CALIB_DIR`` overrides; default is ``<repo>/calibration``. The
-    extrinsics here are produced by the (Part A) calibration scripts — this
+    ``$LIMBIC_CALIB_DIR`` overrides; default is ``<repo>/calib`` — the same
+    directory the calibration scripts write to (and that ``.gitignore`` excludes).
+    The extrinsics here are produced by the (Part A) calibration scripts; this
     input only consumes them.
     """
-    return pathlib.Path(os.environ.get("LIMBIC_CALIB_DIR", str(_REPO_ROOT / "calibration")))
+    return pathlib.Path(os.environ.get("LIMBIC_CALIB_DIR", str(_REPO_ROOT / "calib")))
 
 
 def _camera_configs() -> list[tuple["int | str", str]]:
@@ -83,8 +84,13 @@ def _camera_configs() -> list[tuple["int | str", str]]:
         is a camera index or a name substring (resolved by ``open_camera``);
         ``role`` selects that camera's ``*_CAM_<role>.npz`` calibration. This is
         the two-USB-C-camera setup.
-      * else single camera: ``$LIMBIC_CAMERA`` (index or name, default 0) with
-        role ``$LIMBIC_CAM_ROLE`` (default "A").
+      * else single camera: ``$LIMBIC_CAMERA`` (index or name) with role
+        ``$LIMBIC_CAM_ROLE`` (default "A").
+      * else (no env at all): the calibrated DUAL RIG from
+        ``limbic.control.calibration.CAMERAS`` — each role opened BY NAME (so a
+        device-index shuffle doesn't break it), exactly like the dual-camera
+        detector script. This is the default the moving-arm pipeline perceives
+        with, so it cross-verifies across both cameras out of the box.
     """
     spec_list = os.environ.get("LIMBIC_CAMERAS")
     if spec_list:
@@ -100,29 +106,33 @@ def _camera_configs() -> list[tuple["int | str", str]]:
         if configs:
             return configs
 
-    spec = os.environ.get("LIMBIC_CAMERA", "0")
-    role = os.environ.get("LIMBIC_CAM_ROLE", "A")
-    return [(int(spec) if spec.isdigit() else spec, role)]
+    single = os.environ.get("LIMBIC_CAMERA")
+    if single is not None:
+        role = os.environ.get("LIMBIC_CAM_ROLE", "A")
+        return [(int(single) if single.isdigit() else single, role)]
 
+    # Default: the calibrated dual rig, addressed by camera NAME per role.
+    try:
+        from limbic.control.calibration import CAMERAS
 
-# A YOLO-World model is expensive to build, so reuse one across reads and across
-# cameras. Cached per process; rebuilt only if construction previously failed
-# (e.g. before the user installs ultralytics).
-_detector = None
+        return [(cam["name"], role) for role, cam in CAMERAS.items()]
+    except Exception:
+        # If calibration config can't be imported, degrade to a single camera 0.
+        return [(0, "A")]
 
 
 def _get_detector():
-    """Return a shared ``limbic.vision.Detector``, or raise with an install hint.
+    """Return the shared detection backend (Grounding DINO by default).
 
-    The import is lazy (the 'vision' extra is optional, §0.4) so merely importing
-    this module never requires torch/ultralytics — only actually detecting does.
+    Delegates to ``limbic.vision.get_detector``, which builds the model once per
+    process and picks the backend from ``$LIMBIC_VISION_BACKEND`` (else DINO when
+    ``transformers`` is installed, else YOLO-World). The import is lazy (the
+    'vision' extra is optional, §0.4) so merely importing this module never
+    requires torch — only actually detecting does.
     """
-    global _detector
-    if _detector is None:
-        from limbic.vision import Detector  # lazy: optional 'vision' extra
+    from limbic.vision import get_detector  # lazy: optional 'vision' extra
 
-        _detector = Detector()
-    return _detector
+    return get_detector()
 
 
 def _load_calibration(role: str):
@@ -140,10 +150,40 @@ def _load_calibration(role: str):
 
 
 def _vision_installed() -> bool:
-    """True if the YOLO stack (torch + ultralytics) is importable, without building it."""
+    """True if the active detection backend's deps are importable (no model build).
+
+    Both backends need ``torch``; Grounding DINO additionally needs
+    ``transformers`` and YOLO-World needs ``ultralytics``. We check the deps for
+    whichever backend ``limbic.vision`` would actually select, so the health
+    check matches what detection will really try to run.
+    """
     import importlib.util
 
-    return all(importlib.util.find_spec(m) is not None for m in ("torch", "ultralytics"))
+    def have(*mods: str) -> bool:
+        return all(importlib.util.find_spec(m) is not None for m in mods)
+
+    try:
+        from limbic.vision import _default_backend
+
+        backend = _default_backend()
+    except Exception:
+        backend = "dino"
+    if backend == "yolo":
+        return have("torch", "ultralytics")
+    return have("torch", "transformers")
+
+
+def _install_hint() -> str:
+    """Backend-appropriate install instruction for the missing vision deps."""
+    try:
+        from limbic.vision import _default_backend
+
+        backend = _default_backend()
+    except Exception:
+        backend = "dino"
+    if backend == "yolo":
+        return "the vision extra is not installed (torch + ultralytics). Install with: pip install ultralytics"
+    return "the vision extra is not installed (torch + transformers). Install with: pip install transformers torch"
 
 
 def _grab_frame(camera_spec):
@@ -175,14 +215,15 @@ def _grab_frame(camera_spec):
 
 
 def _detect_one_camera(
-    spec, role: str, prompt: str, conf: float, restrict_to_mat: bool
+    spec, role: str, prompt: str, conf: float | None, restrict_to_mat: bool
 ) -> tuple[list[dict[str, Any]], str | None]:
     """Detect + localize on a single camera. Returns ``(objects, error)``.
 
     Each object dict carries ``camera`` (the role), ``table_mm`` (or None if that
-    camera isn't calibrated) and, when calibrated, ``_cam_xy`` (the camera's own
-    table-frame position) used by the closest-camera merge. ``_cam_xy`` is
-    stripped before the reading is returned to the model.
+    camera isn't calibrated), ``size_mm`` (real footprint when calibrated) and,
+    when calibrated, ``_cam_xy`` (the camera's own table-frame position) used by
+    the closest-camera merge. ``_cam_xy`` is stripped before the reading is
+    returned to the model.
     """
     frame, cam_err = _grab_frame(spec)
     if frame is None:
@@ -190,7 +231,10 @@ def _detect_one_camera(
 
     try:
         detector = _get_detector()
-        detections = detector.detect_boxes(frame, prompt, conf=float(conf))
+        # conf=None -> let the backend apply its own rig-tuned threshold (DINO and
+        # YOLO-World score on different scales, so there is no single good default).
+        kw = {} if conf is None else {"conf": float(conf)}
+        detections = detector.detect_boxes(frame, prompt, **kw)
     except Exception as exc:
         return [], f"detection failed on camera {spec!r}: {exc}"
 
@@ -223,6 +267,7 @@ def _detect_one_camera(
                 continue
         u, v = det.center
         table_mm = None
+        size_mm = None
         if calib is not None:
             intr, extr = calib
             try:
@@ -232,12 +277,22 @@ def _detect_one_camera(
                 table_mm = [round(x_mm, 1), round(y_mm, 1)]
             except Exception:
                 table_mm = None  # ray/extrinsics issue — keep the pixel, drop coord
+            try:
+                # Real footprint (long, short) in mm — lets the brain check the
+                # object fits the gripper and pick an approach. Best-effort.
+                from limbic.vision.sizing import object_size_mm
+
+                long_mm, short_mm = object_size_mm(frame, det.box, intr, extr)
+                size_mm = [round(long_mm, 1), round(short_mm, 1)]
+            except Exception:
+                size_mm = None
         objects.append(
             {
                 "label": det.label,
                 "confidence": round(float(det.confidence), 3),
                 "pixel": [round(u, 1), round(v, 1)],
                 "table_mm": table_mm,
+                "size_mm": size_mm,
                 "camera": role,
                 "_cam_xy": cam_xy,
             }
@@ -272,7 +327,16 @@ def _merge_closest_camera(objects: list[dict[str, Any]], merge_mm: float) -> lis
             if math.hypot(ax - bx, ay - by) <= merge_mm:
                 group.append(located[j])
                 used[j] = True
-        merged.append(_pick_closest(group))
+        winner = _pick_closest(group)
+        # Cross-verification (§dual-camera): an object seen by MORE THAN ONE
+        # camera at the same (x, y) is "confirmed" — the brain can trust it and
+        # treat a single-camera sighting (occlusion / glare / false positive)
+        # with suspicion.
+        winner["confirmed"] = len({o.get("camera") for o in group}) > 1
+        merged.append(winner)
+
+    for o in rest:
+        o["confirmed"] = False  # no table coord -> can't cross-match
 
     # Drop the internal camera-position field before returning to the model.
     for o in merged + rest:
@@ -313,9 +377,12 @@ class ObjectDetections(Input):
         "millimetres, ready to pass to move_to_xyz/pick. Give `prompt` as the "
         "object name(s) to look for (comma-separated, e.g. 'red cup, blue block'); "
         "open-vocabulary, so any plain object name works. Returns a list of "
-        "{label, confidence, pixel:[u,v], table_mm:[x,y], camera} — use table_mm to "
-        "plan. Call this FIRST to locate anything you must grasp or move. With no "
-        "prompt it returns a health check of the camera(s)/detector/calibration."
+        "{label, confidence, pixel:[u,v], table_mm:[x,y], size_mm:[long,short], "
+        "camera, confirmed} — use table_mm to plan and size_mm to check the object "
+        "fits the gripper; `confirmed` is True when more than one camera agrees on "
+        "the object (trust those; treat single-camera sightings with more caution). "
+        "Call this FIRST to locate anything you must grasp or move. With no prompt "
+        "it returns a health check of the camera(s)/detector/calibration."
     )
     parameters: dict[str, dict[str, Any]] = {
         "prompt": {
@@ -330,10 +397,11 @@ class ObjectDetections(Input):
         "conf": {
             "type": "number",
             "description": (
-                "Minimum detection confidence 0..1. YOLO-World scores low, so the "
-                "default is permissive; raise it if you get false positives."
+                "Minimum detection confidence 0..1. Omit to use the detector's "
+                "rig-tuned default (Grounding DINO and YOLO-World score on "
+                "different scales); raise it if you get false positives."
             ),
-            "default": 0.10,
+            "default": None,
         },
         "restrict_to_mat": {
             "type": "boolean",
@@ -350,7 +418,7 @@ class ObjectDetections(Input):
         self,
         *,
         prompt: str | None = None,
-        conf: float = 0.10,
+        conf: float | None = None,
         restrict_to_mat: bool = True,
         **kwargs: Any,
     ) -> dict[str, Any]:
@@ -361,8 +429,12 @@ class ObjectDetections(Input):
             {"ok": True, "prompt": <str>, "cameras": [<roles>], "calibrated": <bool>,
              "count": <int>,
              "objects": [{"label", "confidence", "pixel": [u, v],
-                          "table_mm": [x, y] | None, "camera": <role>}, ...],
+                          "table_mm": [x, y] | None, "size_mm": [long, short] | None,
+                          "camera": <role>, "confirmed": <bool>}, ...],
              "note": <str, optional>}
+
+        ``size_mm`` is the object's real footprint and ``confirmed`` is True when
+        more than one camera agrees on it (cross-verification, §dual-camera).
 
         With NO prompt, a health check whose ``ok`` is True only when at least one
         camera can produce TABLE-FRAME detections (vision installed + that camera
@@ -393,7 +465,7 @@ class ObjectDetections(Input):
                     any_ready = True
             missing = []
             if not vision_ok:
-                missing.append("install the vision extra (pip install ultralytics)")
+                missing.append(_install_hint())
             if not any_ready and vision_ok:
                 missing.append(
                     "no camera is both reachable and calibrated "
@@ -413,13 +485,7 @@ class ObjectDetections(Input):
 
         # ---- Detection path. ----
         if not _vision_installed():
-            return {
-                "ok": False,
-                "error": (
-                    "the vision extra is not installed (torch + ultralytics). "
-                    "Install with: pip install ultralytics"
-                ),
-            }
+            return {"ok": False, "error": _install_hint()}
 
         all_objects: list[dict[str, Any]] = []
         errors: list[str] = []
@@ -442,6 +508,7 @@ class ObjectDetections(Input):
         else:
             for o in all_objects:
                 o.pop("_cam_xy", None)
+                o["confirmed"] = False  # single camera -> no cross-verification
             objects = all_objects
 
         calibrated = any(o.get("table_mm") is not None for o in objects)

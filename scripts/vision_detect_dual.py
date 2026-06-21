@@ -44,20 +44,20 @@ import time
 
 import cv2 as cv
 import numpy as np
-import torch
-from torchvision.ops import nms
-from PIL import Image
-from transformers import AutoProcessor, AutoModelForZeroShotObjectDetection
 
 sys.path.insert(0, str(pathlib.Path(__file__).resolve().parent.parent))
 sys.path.insert(0, str(pathlib.Path(__file__).resolve().parent))  # for sibling scripts
 from limbic.control import calibration
 from limbic.control.localization import load_camera, pixel_to_table
 from limbic.platform_support import open_camera
-from limbic.vision.workspace import (
-    DEFAULT_SAT_MAX, DEFAULT_VAL_MAX, DEFAULT_VAL_MIN,
-    box_in_workspace, gray_mat_mask,
-)
+# The same Grounding DINO detector the live pipeline uses
+# (inputs/library/object_detections.py -> limbic.vision.get_detector).
+from limbic.vision.dino import DinoDetector
+# Object-footprint sizing now lives in the package, so the viewer and the live
+# pipeline share ONE copy.
+from limbic.vision.sizing import box_edge_size_mm as _box_edge_size_mm
+from limbic.vision.sizing import object_size_mm
+from limbic.vision.workspace import box_in_workspace, gray_mat_mask
 # Live extrinsics: re-solve the AprilTag pose every detection pass (§A.5).
 from stage3_extrinsics import detect_tag, solve_extrinsics
 
@@ -66,7 +66,6 @@ CLASSES     = ["red cube", "yellow cube", "block", "card", "cylinder",
                "toy banana", "toy pear", "tape roll", "chess piece", "soda can", "bottle"]   # ← edit freely
 BOX_THRESH  = 0.25
 TEXT_THRESH = 0.20
-INFER_WIDTH = None     # detect-on-demand -> run at FULL 1280 res (better on crowded scenes)
 NMS_IOU     = 0.7      # only merge heavily-overlapping duplicates; keep ADJACENT objects apart
 MATCH_MM    = 35.0     # two detections within this table distance = the same object
 WIDTH, HEIGHT = 1280, 720
@@ -74,112 +73,41 @@ WIDTH, HEIGHT = 1280, 720
 ROLES = ["B", "A"]     # left panel = LEFT cam (B), right = RIGHT cam (A)
 PANEL_W, PANEL_H = 640, 360
 
-TEXT_PROMPT = ". ".join(c.lower() for c in CLASSES) + "."
-
 
 DEBUG = os.environ.get("VISION_DEBUG", "1") == "0"
 
 
-def detect_frame(frame, processor, model, device, tag=""):
+def detect_frame(frame, detector, tag=""):
     """Detect on one full-res frame -> list of dicts with box, label, conf, centre.
-    Applies NMS and the strict gray-mat workspace filter (off-mat boxes dropped)."""
+
+    Delegates to the shared Grounding DINO detector (the same one the live
+    pipeline uses), then applies the strict gray-mat workspace filter (off-mat
+    boxes dropped). NMS happens inside the detector."""
     h, w = frame.shape[:2]
     ws_mask, _ = gray_mat_mask(frame)
 
-    if INFER_WIDTH and w > INFER_WIDTH:
-        scale = INFER_WIDTH / w
-        infer = cv.resize(frame, (INFER_WIDTH, int(h * scale)))
-    else:
-        scale = 1.0
-        infer = frame
-
-    image = Image.fromarray(cv.cvtColor(infer, cv.COLOR_BGR2RGB))
-    inputs = processor(images=image, text=TEXT_PROMPT, return_tensors="pt").to(device)
-    with torch.no_grad():
-        outputs = model(**inputs)
-    results = processor.post_process_grounded_object_detection(
-        outputs, inputs.input_ids, threshold=BOX_THRESH,
-        text_threshold=TEXT_THRESH, target_sizes=[image.size[::-1]],
-    )[0]
-    labels = results.get("text_labels", results.get("labels"))
-
-    boxes_t, scores_t = results["boxes"], results["scores"]
-    n_raw = len(boxes_t)
-    if len(boxes_t) > 0:
-        keep = nms(boxes_t, scores_t, NMS_IOU)
-        boxes_t, scores_t = boxes_t[keep], scores_t[keep]
-        labels = [labels[i] for i in keep.tolist()]
-    n_nms = len(boxes_t)
+    raw = detector.detect_boxes(
+        frame, CLASSES, conf=BOX_THRESH,
+        text_threshold=TEXT_THRESH, nms_iou=NMS_IOU,
+    )
 
     dets, n_offmat = [], 0
-    for box, score, label in zip(boxes_t, scores_t, labels):
-        x1, y1, x2, y2 = (box / scale).int().tolist()
+    for d in raw:
+        x1, y1, x2, y2 = (int(round(v)) for v in d.box)
         if not box_in_workspace(ws_mask, x1, y1, x2, y2):
             n_offmat += 1
             continue
         cx, cy = (x1 + x2) / 2.0, (y1 + y2) / 2.0
-        dets.append({"label": str(label), "conf": float(score),
+        dets.append({"label": d.label, "conf": d.confidence,
                      "box": (x1, y1, x2, y2), "px": (cx, cy)})
 
     if DEBUG:
         mat = "NONE (filter OFF)" if ws_mask is None else \
             f"{int((ws_mask > 0).sum())}px ({100*(ws_mask > 0).mean():.0f}% of frame)"
-        top = torch.sigmoid(outputs.logits).max(-1)[0].max().item()
         print(f"[debug {tag}] frame {w}x{h} mean={frame.mean():.0f} | mat={mat} | "
-              f"top_score={top:.2f} thr={BOX_THRESH} | "
-              f"raw={n_raw} -> nms={n_nms} -> off-mat dropped={n_offmat} -> kept={len(dets)}")
+              f"thr={BOX_THRESH} | raw={len(raw)} -> off-mat dropped={n_offmat} "
+              f"-> kept={len(dets)}")
     return dets
-
-
-def _box_edge_size_mm(box, intr, extr):
-    """Fallback footprint: project the box's edge midpoints to z=0 and measure the
-    two spans. Axis-aligned and includes box padding, so it over-reads — only used
-    when the object can't be segmented out of the mat."""
-    x1, y1, x2, y2 = box
-    cx, cy = (x1 + x2) / 2.0, (y1 + y2) / 2.0
-    lx, ly = pixel_to_table(x1, cy, intr, extr)
-    rx, ry = pixel_to_table(x2, cy, intr, extr)
-    tx, ty = pixel_to_table(cx, y1, intr, extr)
-    bx, by = pixel_to_table(cx, y2, intr, extr)
-    return (math.hypot(rx - lx, ry - ly), math.hypot(bx - tx, by - ty))
-
-
-def object_size_mm(frame, box, intr, extr):
-    """Real object footprint (long_mm, short_mm), orientation-independent.
-
-    Segments the object inside the box (it's coloured/dark; the mat is gray =
-    low-saturation), fits an ORIENTED min-area rectangle to the largest blob, and
-    projects that rect's corners to the table plane. This beats the axis-aligned
-    box because (a) it drops the box padding and (b) a diagonal object (e.g. a
-    banana) gets its true width, not its bounding-box diagonal. Falls back to the
-    box-edge projection when the object can't be cleanly segmented."""
-    x1, y1, x2, y2 = box
-    rx1, ry1 = max(x1, 0), max(y1, 0)
-    roi = frame[ry1:y2, rx1:x2]
-    if roi.size == 0:
-        return _box_edge_size_mm(box, intr, extr)
-
-    hsv = cv.cvtColor(roi, cv.COLOR_BGR2HSV)
-    s, v = hsv[:, :, 1], hsv[:, :, 2]
-    # object = anything that is NOT the gray mat: coloured, dark, or blown out.
-    obj = ((s > DEFAULT_SAT_MAX) | (v < DEFAULT_VAL_MIN) | (v > DEFAULT_VAL_MAX))
-    obj = obj.astype("uint8") * 255
-    k = cv.getStructuringElement(cv.MORPH_ELLIPSE, (3, 3))
-    obj = cv.morphologyEx(obj, cv.MORPH_OPEN, k)
-
-    cnts, _ = cv.findContours(obj, cv.RETR_EXTERNAL, cv.CHAIN_APPROX_SIMPLE)
-    if not cnts:
-        return _box_edge_size_mm(box, intr, extr)
-    c = max(cnts, key=cv.contourArea)
-    if cv.contourArea(c) < 0.10 * roi.shape[0] * roi.shape[1]:
-        return _box_edge_size_mm(box, intr, extr)  # too small/sparse to trust
-
-    pts = cv.boxPoints(cv.minAreaRect(c))            # 4 corners, ROI px
-    pts = pts + np.array([rx1, ry1], dtype=np.float32)  # -> full-frame px
-    table = [pixel_to_table(px, py, intr, extr) for px, py in pts]
-    side1 = math.hypot(table[1][0] - table[0][0], table[1][1] - table[0][1])
-    side2 = math.hypot(table[2][0] - table[1][0], table[2][1] - table[1][1])
-    return (max(side1, side2), min(side1, side2))
 
 
 def add_table_xy(dets, intr, extr, frame=None):
@@ -299,12 +227,9 @@ def main() -> None:
                     help="use the saved extrinsics instead of re-solving the tag each pass")
     args = ap.parse_args()
 
-    device = "cuda" if torch.cuda.is_available() else "cpu"
-    print(f"Loading {args.model} on {device.upper()} ...")
-    processor = AutoProcessor.from_pretrained(args.model)
-    model = AutoModelForZeroShotObjectDetection.from_pretrained(args.model).to(device)
-    model.eval()
-    print("Model ready.")
+    print(f"Loading {args.model} ...")
+    detector = DinoDetector(args.model)
+    print(f"Model ready (on {detector.device.upper()}).")
 
     calib_dir = pathlib.Path(args.calib_dir)
     cams, calib, tag_yaw = {}, {}, {}
@@ -353,7 +278,7 @@ def main() -> None:
                     extr = (live_extrinsics(r, frames[r], intr, saved_extr, tag_yaw[r])[0]
                             if live else saved_extr)
                     last[r] = add_table_xy(
-                        detect_frame(frames[r], processor, model, device, tag=f"CAM_{r}"),
+                        detect_frame(frames[r], detector, tag=f"CAM_{r}"),
                         intr, extr, frame=frames[r])
                 mark_confirmed(last["A"], last["B"])
                 detected_once = True
