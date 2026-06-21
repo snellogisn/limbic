@@ -22,6 +22,7 @@ from __future__ import annotations
 
 import argparse
 import json
+import os
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 from urllib.parse import urlparse
@@ -132,6 +133,25 @@ def main() -> int:
     parser.add_argument("--port", type=int, default=8765, help="port (default 8765)")
     parser.add_argument("--host", default="127.0.0.1", help="bind host (default 127.0.0.1)")
     args = parser.parse_args()
+
+    # Announce the PLANNER mode loudly. Without ANTHROPIC_API_KEY the pipeline
+    # silently falls back to the offline regex planner, which only understands
+    # literal "(x, y)" commands — natural-language tasks then come back
+    # "cannot_complete" and the arm never moves. That used to be invisible (just a
+    # 200 and a still arm), so we surface it here at startup.
+    backend = os.environ.get("LIMBIC_BACKEND", "auto")
+    if os.environ.get("ANTHROPIC_API_KEY"):
+        print("[web] planner: CLAUDE (ANTHROPIC_API_KEY set) — understands natural language.")
+    else:
+        print("[web] " + "!" * 64)
+        print("[web] WARNING: ANTHROPIC_API_KEY is NOT set -> using the OFFLINE planner.")
+        print("[web]   The offline planner only understands literal coordinate commands like")
+        print("[web]   'pick up the block at (160, 40) and place it at (160, -40)'.")
+        print("[web]   Natural-language tasks will come back 'cannot_complete' and the arm")
+        print("[web]   will NOT move. Set the key and restart for full Claude planning:")
+        print("[web]     PowerShell:  $env:ANTHROPIC_API_KEY = 'sk-ant-...'")
+        print("[web] " + "!" * 64)
+    print(f"[web] arm backend: {backend} (set LIMBIC_BACKEND=real / LIMBIC_PORT=COM7 to force the real arm)")
 
     server = ThreadingHTTPServer((args.host, args.port), Handler)
     url = f"http://{'localhost' if args.host == '127.0.0.1' else args.host}:{args.port}"
