@@ -42,6 +42,11 @@ Hardware grasp + motion rules (this arm, learned the hard way — follow them):
   to one side of the object's reported centre rather than dead-on.
 - Descend INTO the object: lower to a grasp height at or slightly below the top of
   the object so the fingers close around it, not above it.
+- Object height is FIXED, not sensed: blocks/cubes on this table are ~25 mm tall,
+  and a grasp must reach 10-15 mm INTO the object. The pick/place defaults already
+  assume this (object_height_mm=25, grasp_depth_mm=13). Camera height estimates are
+  unreliable, so DO NOT pass your own object_height_mm or grasp_depth_mm — rely on
+  the defaults unless the user explicitly gives a different object size.
 - Lift before retract: after closing on an object, lift straight up first, THEN
   move laterally. Dragging sideways at grasp height knocks things over. On a
   place, lower and open BEFORE lifting away.

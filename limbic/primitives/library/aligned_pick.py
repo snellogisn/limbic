@@ -59,8 +59,8 @@ class AlignedPick(Primitive):
         },
         "grasp_depth_mm": {
             "type": "number",
-            "description": "How far BELOW the object top to drive the tip so the fingers straddle it (mm). Default 20.",
-            "default": 20.0,
+            "description": "How far BELOW the object top to drive the tip so the fingers straddle it (mm). Reach 10-15 mm INTO the object. Default 13.",
+            "default": 13.0,
         },
         "claw_y_offset_mm": {
             "type": "number",
@@ -92,7 +92,7 @@ class AlignedPick(Primitive):
         target_label: str = "the object",
         object_height_mm: float = 25.0,
         hover_z_mm: float = 60.0,
-        grasp_depth_mm: float = 20.0,
+        grasp_depth_mm: float = 13.0,
         claw_y_offset_mm: float = -10.0,
         min_grasp_z_mm: float = 3.0,
         max_align_iters: int = 3,
