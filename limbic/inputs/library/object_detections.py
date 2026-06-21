@@ -186,7 +186,29 @@ def _install_hint() -> str:
     return "the vision extra is not installed (torch + transformers). Install with: pip install transformers torch"
 
 
-def _grab_frame(camera_spec):
+def _calib_image_size(role: str) -> tuple[int, int]:
+    """``(width, height)`` the intrinsics for ``role`` were calibrated at.
+
+    The whole pixel→table chain assumes the frame is the SAME size as the
+    calibration image — otherwise ``pixel_to_table`` applies a camera matrix for
+    one resolution to pixels from another and mislocates everything (this was the
+    bug: a 640×480 default capture localized against 1280×720 intrinsics gave
+    ~100 mm position errors). Read it from the intrinsics ``.npz`` (key
+    ``image_size``); default to the rig's 1280×720 if unavailable.
+    """
+    try:
+        import numpy as np
+
+        d = np.load(str(_calib_dir() / f"intrinsics_CAM_{role}.npz"))
+        if "image_size" in d.files:
+            w, h = (int(x) for x in d["image_size"])
+            return w, h
+    except Exception:
+        pass
+    return 1280, 720
+
+
+def _grab_frame(camera_spec, width: int | None = None, height: int | None = None):
     """Capture one BGR frame. Returns ``(frame, error)`` — exactly one is None."""
     try:
         import cv2  # noqa: F401  (presence check; used by open_camera)
@@ -198,7 +220,7 @@ def _grab_frame(camera_spec):
     cap = None
     try:
         try:
-            cap = open_camera(camera_spec)
+            cap = open_camera(camera_spec, width=width, height=height)
         except (ImportError, RuntimeError) as exc:
             return None, str(exc)
         ok, frame = cap.read()
@@ -225,9 +247,22 @@ def _detect_one_camera(
     the closest-camera merge. ``_cam_xy`` is stripped before the reading is
     returned to the model.
     """
-    frame, cam_err = _grab_frame(spec)
+    # Capture at the SAME resolution the intrinsics were calibrated at, so the
+    # detected pixels live in the calibration's pixel space and pixel_to_table is
+    # correct. (Opening without a size gives the driver default — usually 640×480 —
+    # which is what broke localization in the web run.)
+    calib_w, calib_h = _calib_image_size(role)
+    frame, cam_err = _grab_frame(spec, width=calib_w, height=calib_h)
     if frame is None:
         return [], cam_err
+
+    # Safety net: if the driver refused the requested size, resize to the calibrated
+    # size BEFORE detecting so boxes/pixels/segmentation all share that space.
+    fh, fw = frame.shape[:2]
+    if (fw, fh) != (calib_w, calib_h):
+        import cv2
+
+        frame = cv2.resize(frame, (calib_w, calib_h))
 
     try:
         detector = _get_detector()
