@@ -27,7 +27,6 @@ further: look before you grab.
 from __future__ import annotations
 
 import base64
-import math
 import os
 from typing import Any
 
@@ -38,15 +37,8 @@ DEFAULT_ALIGN_MODEL = "claude-opus-4-8"
 # Defaults for the correction loop — small, because each iteration is a real
 # camera capture + an API round-trip + an arm move.
 DEFAULT_MAX_ITERS = 3
-DEFAULT_TOLERANCE_MM = 6.0     # residual below this => reasonably centred, stop
+DEFAULT_TOLERANCE_MM = 4.0     # |dx|,|dy| below this => already aligned, stop
 DEFAULT_MAX_STEP_MM = 40.0     # clamp any single suggested nudge (safety)
-# CONVERGENCE (why the old loop was disabled — it over-adjusted and missed):
-# apply only a FRACTION of each suggested nudge so we creep onto the target
-# instead of overshooting and oscillating; and STOP as soon as we're no longer
-# getting closer. This is what keeps it from "occurring far too often": a couple
-# of damped looks settle it, then it descends.
-DEFAULT_DAMPING = 0.7          # apply this fraction of each suggested nudge
-DEFAULT_MIN_IMPROVE_MM = 2.0   # stop if the residual stops shrinking by >= this
 
 
 # --------------------------------------------------------------------------- #
@@ -271,20 +263,13 @@ def align_to_object(
     max_iters: int = DEFAULT_MAX_ITERS,
     tolerance_mm: float = DEFAULT_TOLERANCE_MM,
     max_step_mm: float = DEFAULT_MAX_STEP_MM,
-    damping: float = DEFAULT_DAMPING,
-    min_improve_mm: float = DEFAULT_MIN_IMPROVE_MM,
     save_dir=None,
 ) -> dict[str, Any]:
     """Visually centre the gripper over the object near ``(x_mm, y_mm)``.
 
     Assumes the arm is already hovering at ``hover_z_mm`` above ``(x_mm, y_mm)``.
-    Captures the camera, asks Claude how far off it is, nudges a DAMPED fraction of
-    that toward the object, and repeats — but only until it is *reasonably centred*:
-    it stops the moment the residual is within ``tolerance_mm`` OR stops shrinking
-    (``min_improve_mm``), and never exceeds ``max_iters`` looks. So it self-corrects
-    a poorly-aimed grasp without the endless over-adjusting that made the one-shot
-    loop miss. Returns the BEST (closest) aim it saw — not necessarily the last —
-    so a final overshoot can't degrade the grasp::
+    Captures the camera, asks Claude for a correction, nudges the arm, and repeats
+    up to ``max_iters`` times. Returns the corrected aim::
 
         {"x_mm", "y_mm", "aligned": bool, "iters": int, "adjusted": bool,
          "history": [...], "note": str|None}
@@ -336,10 +321,6 @@ def align_to_object(
     cx, cy = float(x_mm), float(y_mm)
     aligned = False
     note: str | None = None
-    # Remember the closest aim we've seen, so oscillation / a final overshoot
-    # never leaves us worse than our best look.
-    best_x, best_y, best_mag = cx, cy, float("inf")
-    prev_mag = float("inf")
 
     for i in range(1, max_iters + 1):
         frame, cam_err = grab_frame(camera_spec)
@@ -377,36 +358,15 @@ def align_to_object(
 
         dx = _clamp_step(adj["dx_mm"], max_step_mm)
         dy = _clamp_step(adj["dy_mm"], max_step_mm)
-        mag = math.hypot(dx, dy)  # how far the CURRENT aim still is from centred
 
-        # Track the closest aim seen so far (before we move off it).
-        if mag < best_mag:
-            best_x, best_y, best_mag = cx, cy, mag
-
-        # Reasonably centred -> stop. This is the "good enough" gate that keeps it
-        # from re-checking far too often: a few mm off is fine for the grasp.
-        if adj["aligned"] or mag <= tolerance_mm:
+        if adj["aligned"] or (abs(dx) <= tolerance_mm and abs(dy) <= tolerance_mm):
             aligned = True
             break
 
-        # No longer getting closer -> we're as near as this loop will get; stop
-        # instead of nudging back and forth (the old over-adjust failure mode).
-        if mag >= prev_mag - min_improve_mm:
-            note = note or "stopped: alignment no longer improving"
-            break
-        prev_mag = mag
-
-        # Apply only a DAMPED fraction of the suggested nudge (overshoot guard) and
-        # re-hover at the new aim — straight down stays straight down, we just shift
-        # WHERE we'll descend so the claw lands on the cube, not in front of it.
-        cx += damping * dx
-        cy += damping * dy
+        # Apply the correction and re-hover at the new aim point.
+        cx += dx
+        cy += dy
         arm.reach_above(cx, cy, height_mm=hover_z_mm)
-
-    # Settle on the BEST aim we saw (not necessarily the last) before descending.
-    if best_mag < float("inf") and (abs(best_x - cx) > 1e-6 or abs(best_y - cy) > 1e-6):
-        arm.reach_above(best_x, best_y, height_mm=hover_z_mm)
-        cx, cy = best_x, best_y
 
     return {
         "x_mm": cx,

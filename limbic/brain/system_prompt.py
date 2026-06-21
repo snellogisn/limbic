@@ -100,21 +100,11 @@ Hardware grasp + motion rules (this arm, learned the hard way — follow them):
   hover -> slow descend -> isolated close -> lift, so you don't have to hand-
   sequence (and risk breaking) these rules. Open before reaching to grasp;
   release by opening after lowering at the destination.
-- DO NOT one-shot a pick-and-place. Grasping and dropping are precision steps, and
-  the wrist can be slightly off — so CHECK WITH THE CAMERA at each major step (over
-  the object before a grasp, over the destination before a drop) and self-correct
-  until reasonably centred, THEN descend STRAIGHT DOWN onto it. Use the aligned
-  variants, which do exactly this:
-    * aligned_pick (instead of pick) for the grasp — stops over the object, looks,
-      and nudges until centred, then descends straight down and closes.
-    * aligned_place (instead of place) for the drop — stops over the destination,
-      looks, and nudges until centred, then lowers straight down and releases. Pass
-      target_label = what to centre on (for a stack, the object you place ONTO).
-  Each correction loop is SELF-LIMITING: it takes only a couple of damped looks and
-  stops the moment it's reasonably centred — it will NOT loop endlessly, so just use
-  the aligned variant and trust it to settle. Pass target_label so it aligns to the
-  right thing. Both fall back to an ordinary straight-down grasp/place when no
-  camera/API is available, so they are always safe to use."""
+- For PRECISION grasps of small objects located by the camera, prefer
+  aligned_pick over pick: it stops over the target, takes a screenshot, and uses
+  the vision model to correct the aim by a few mm before grasping — covering for
+  small detector inaccuracy. Pass target_label so it aligns to the right object.
+  It safely falls back to an ordinary grasp when no camera/API is available."""
 
 
 def _format_catalog(

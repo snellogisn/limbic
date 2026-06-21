@@ -42,15 +42,12 @@ os.environ.setdefault("LIMBIC_LOG_DIR", str(_REPO_ROOT / "logs"))
 # machine with no such port (or no lerobot) the auto backend falls back to mock.
 os.environ.setdefault("LIMBIC_PORT", "COM5")
 
-# MID-RUN closed-loop camera correction is ON: at each major step (over the cube
-# before a grasp, over the destination before a drop) the arm looks, checks whether
-# it's actually centred, and nudges itself until it is — instead of one-shotting the
-# whole pick/place open-loop and missing when the wrist tilts. The loop is now
-# convergent (damped nudges, stops as soon as it's reasonably centred or stops
-# improving, hard iteration cap — see vision.visual_align), so it self-corrects
-# without the over-adjusting that made the old version miss. setdefault, so an
-# explicit env still wins; set LIMBIC_VISUAL_ALIGN=0 to force the old open-loop run.
-os.environ.setdefault("LIMBIC_VISUAL_ALIGN", "1")
+# No MID-RUN camera correction: the plan executes start-to-finish without the
+# closed-loop visual grasp nudge (aligned_pick -> align_to_object), which used to
+# over-adjust and miss. The arm only re-checks the camera AFTER the task — it homes
+# and re-detects for a single, lenient verification pass (see the plan_and_run call
+# below). setdefault, so an explicit env still wins.
+os.environ.setdefault("LIMBIC_VISUAL_ALIGN", "0")
 
 # Motion timing for web-driven runs is set HERE, before limbic imports (config.py
 # reads these env vars once at import). Safety rule: the website must NEVER drive

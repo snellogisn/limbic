@@ -79,8 +79,8 @@ class AlignedPick(Primitive):
         },
         "align_tolerance_mm": {
             "type": "number",
-            "description": "Consider the aim good enough once within this many mm of centred. Default 6.",
-            "default": 6.0,
+            "description": "Consider the aim good enough once the suggested nudge is within this many mm. Default 4.",
+            "default": 4.0,
         },
     }
 
@@ -96,7 +96,7 @@ class AlignedPick(Primitive):
         claw_y_offset_mm: float = 0.0,
         min_grasp_z_mm: float = 3.0,
         max_align_iters: int = 3,
-        align_tolerance_mm: float = 6.0,
+        align_tolerance_mm: float = 4.0,
         **kwargs: Any,
     ) -> tuple[float, float, float]:
         log = runlog.current()
