@@ -21,11 +21,13 @@ from dataclasses import dataclass
 from ..platform_support import detect_serial_port
 
 
-# Gripper "percent open" scale, verified on the reference hardware:
-# 100 = fully open, 10 = closed enough to grip. Kept on a 0..100 scale (not raw
-# servo ticks) so it reads the same regardless of the underlying motor.
+# Gripper "percent open" scale (0..100, not raw servo ticks, so it reads the same
+# regardless of the underlying motor): 100 = fully open, 0 = fully closed.
+# CLOSED is 0 so a grip closes ALL THE WAY: with nothing in the claw the fingers
+# shut completely; with an object the servo (position mode) simply stops on it and
+# holds — i.e. "close all the way unless something is blocking it".
 GRIPPER_OPEN = 100.0
-GRIPPER_CLOSED = 10.0
+GRIPPER_CLOSED = 0.0
 
 # Smooth-motion profile. Moves are interpolated into fine sub-steps with an
 # ease-in/ease-out velocity curve, so the arm accelerates and decelerates instead

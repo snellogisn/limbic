@@ -28,17 +28,30 @@ from .tools import TABLE_FRAME_NOTE
 # Physical grasp heuristics for this tabletop gripper. These encode hard-won
 # hardware reality the model cannot infer from the primitive names alone.
 GRASP_RULES = """\
-Hardware grasp rules (this gripper, learned the hard way):
+Hardware grasp + motion rules (this arm, learned the hard way — follow them):
+- Gripper acts in ISOLATION: open or close the claw ONLY with the arm fully
+  stopped — never in the same step as an arm move, and never while the arm is in
+  motion. Settle, actuate, settle. (The open_hand/close_hand primitives and the
+  pick/place composites already enforce this; rely on them.)
+- Close goes ALL THE WAY: close_hand shuts the claw fully and grips firmly,
+  stopping on the object if one is in the way. Don't try to half-close.
+- Slow for contact: descending to grasp, lowering to place, and pushing are slow,
+  controlled moves — use descend_to / pick / place (which use the precision
+  profile), not a fast transit, for anything that touches an object or the table.
 - Claw offset: the gripper closes slightly off-centre, so aim a few millimetres
   to one side of the object's reported centre rather than dead-on.
-- Descend INTO the object: lower to grasp height that is at or slightly below the
-  top of the object so the fingers close around it, not above it.
+- Descend INTO the object: lower to a grasp height at or slightly below the top of
+  the object so the fingers close around it, not above it.
 - Lift before retract: after closing on an object, lift straight up first, THEN
-  move laterally. Dragging sideways at grasp height knocks things over.
-- Stay near the workspace centre: keep targets close to the centre of the
-  reachable area; near the edges IK is strained and grasps are unreliable.
-- Open the gripper before reaching down to grasp; close on the object; open again
-  to release after lowering at the destination."""
+  move laterally. Dragging sideways at grasp height knocks things over. On a
+  place, lower and open BEFORE lifting away.
+- Use the arm's full reach: it can tilt/extend to reach far targets — prefer a
+  reachable plan over declaring a target impossible, but keep precise top-down
+  grasps near the workspace centre where IK is strongest.
+- PREFER the composite pick and place primitives for grasps: they bake in
+  hover -> slow descend -> isolated close -> lift, so you don't have to hand-
+  sequence (and risk breaking) these rules. Open before reaching to grasp;
+  release by opening after lowering at the destination."""
 
 
 def _format_catalog(
