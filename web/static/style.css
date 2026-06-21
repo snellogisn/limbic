@@ -124,3 +124,41 @@ a.link { color: var(--accent); }
 .stream h3 { margin: 18px 0 6px; font-size: 14px; }
 .stream .count { color: var(--muted); font-weight: 400; }
 @media (max-width: 760px) { .logs-layout { grid-template-columns: 1fr; } }
+
+/* Live reasoning box (Ask page) */
+.think-log { max-height: 46vh; overflow-y: auto; padding-right: 4px; }
+.thought {
+  display: flex;
+  gap: 10px;
+  padding: 7px 0;
+  border-top: 1px solid var(--border);
+  align-items: flex-start;
+  animation: fadein 0.18s ease-out;
+}
+.thought:first-child { border-top: none; }
+.thought .t-icon { flex: none; width: 20px; text-align: center; }
+.thought .t-body { flex: 1; min-width: 0; word-wrap: break-word; }
+.thought .t-label { color: var(--accent); font-weight: 600; margin-right: 4px; }
+.thought .t-block { white-space: pre-wrap; color: var(--muted); }
+.thought code { color: #cdd3df; }
+@keyframes fadein { from { opacity: 0; transform: translateY(3px); } to { opacity: 1; transform: none; } }
+
+.live-dot {
+  font-size: 11px;
+  text-transform: uppercase;
+  letter-spacing: 1px;
+  color: var(--ok);
+  font-weight: 700;
+  padding-left: 8px;
+}
+.live-dot::before {
+  content: "";
+  display: inline-block;
+  width: 8px; height: 8px;
+  margin-right: 5px;
+  border-radius: 50%;
+  background: var(--ok);
+  animation: pulse 1.1s ease-in-out infinite;
+  vertical-align: middle;
+}
+@keyframes pulse { 0%, 100% { opacity: 1; } 50% { opacity: 0.25; } }

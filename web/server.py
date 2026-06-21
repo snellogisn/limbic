@@ -25,7 +25,7 @@ import json
 import os
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
-from urllib.parse import urlparse
+from urllib.parse import parse_qs, urlparse
 
 import pipeline  # local module (same folder)
 
@@ -75,6 +75,19 @@ class Handler(BaseHTTPRequestHandler):
             self._send_file(_STATIC_DIR / "runs.html")
         elif route == "/api/runs":
             self._send_json({"runs": pipeline.list_runs()})
+        elif route == "/api/run/live":
+            # Poll the live thought/movement stream of an in-flight (or finished)
+            # run started via POST /api/run/start. ?run_id=...&since=<last seq>.
+            query = parse_qs(urlparse(self.path).query)
+            run_id = (query.get("run_id") or [""])[0]
+            try:
+                since = int((query.get("since") or ["0"])[0])
+            except ValueError:
+                since = 0
+            if not run_id:
+                self._send_json({"error": "missing run_id"}, status=400)
+            else:
+                self._send_json(pipeline.live(run_id, since))
         elif route.startswith("/api/runs/"):
             run_id = route[len("/api/runs/"):]
             detail = pipeline.get_run(run_id)
@@ -103,7 +116,7 @@ class Handler(BaseHTTPRequestHandler):
             self._send_json(pipeline.request_stop())
             return
 
-        if route != "/api/run":
+        if route not in ("/api/run", "/api/run/start"):
             self._send_json({"error": "not found"}, status=404)
             return
 
@@ -118,6 +131,13 @@ class Handler(BaseHTTPRequestHandler):
         mode = payload.get("mode", "auto")
         if not task:
             self._send_json({"error": "missing 'task'"}, status=400)
+            return
+
+        # Non-blocking start: returns a run_id at once so the page can stream the
+        # live reasoning via GET /api/run/live. The blocking /api/run is kept for
+        # direct/programmatic callers (e.g. Claude Code) that want the final result.
+        if route == "/api/run/start":
+            self._send_json(pipeline.start_run_async(task, mode=mode))
             return
 
         try:

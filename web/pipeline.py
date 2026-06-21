@@ -76,6 +76,15 @@ from limbic.control import MotionStopped, safety  # noqa: E402
 # cleared at the start of each run so a stale stop never carries over.
 _STOP = threading.Event()
 
+# In-memory registry of runs started through the non-blocking streaming path
+# (POST /api/run/start). Maps run_id -> {"status": "running"|"done", "result"}.
+# The live thought/movement events themselves are read straight off disk
+# (thinking.jsonl / movements.jsonl), which the brain appends to AS IT RUNS — so
+# the browser sees reasoning arrive in real time by polling /api/run/live.
+_RUNS: dict[str, dict[str, Any]] = {}
+_RUNS_LOCK = threading.Lock()
+_ACTIVE = threading.Event()  # one arm => at most one streaming run at a time
+
 
 def request_stop() -> dict[str, Any]:
     """Signal the in-flight run to stop. Safe to call when nothing is running."""
@@ -208,12 +217,16 @@ def _count_streams(run_dir: Path) -> dict[str, int]:
     return counts
 
 
-def run_task(task: str, mode: str = "auto") -> dict[str, Any]:
+def run_task(task: str, mode: str = "auto", on_start=None) -> dict[str, Any]:
     """Run ``task`` through the pipeline on the mock arm; return a structured result.
 
     ``mode`` is ``"auto"`` (claude if a key is set, else offline), ``"claude"``,
     or ``"offline"``. Everything — the planning, the motion, and (in claude mode)
     the reasoning — is recorded into a fresh run folder under ``logs/``.
+
+    ``on_start``, if given, is called with the run_id the instant the run folder
+    exists (before any planning/motion), so a caller streaming the live thought
+    trail knows which folder to tail.
 
     Returns a dict with at least: ``run_id``, ``task``, ``mode``, ``status``
     (``completed`` | ``cannot_complete`` | ``error``), ``model``, ``plan``,
@@ -238,6 +251,11 @@ def run_task(task: str, mode: str = "auto") -> dict[str, Any]:
     run_dir: Path | None = None
     with runlog.run(task, metadata={"source": "web", "mode": result["mode"]}) as log:
         run_dir = log.run_dir
+        if on_start is not None:
+            try:
+                on_start(run_dir.name)
+            except Exception:
+                pass  # a streaming hook must never break the run
         arm = RobotArm(verbose=False, stop_event=_STOP).connect()
         try:
             if use_claude:
@@ -301,6 +319,100 @@ def run_task(task: str, mode: str = "auto") -> dict[str, Any]:
     # Persist the rich web result alongside the raw log streams.
     (run_dir / "web_result.json").write_text(json.dumps(result, indent=2, default=str), encoding="utf-8")
     return result
+
+
+# --------------------------------------------------------------------------- #
+# Live streaming path (POST /api/run/start + GET /api/run/live)
+# --------------------------------------------------------------------------- #
+def start_run_async(task: str, mode: str = "auto") -> dict[str, Any]:
+    """Kick off a run on a background thread; return its ``run_id`` immediately.
+
+    The browser then polls :func:`live` to watch the brain's reasoning, tool use,
+    and motion arrive in real time, instead of staring at a spinner until the
+    whole run finishes. Only one run at a time (one physical arm).
+    """
+    task = (task or "").strip()
+    if not task:
+        return {"error": "missing 'task'"}
+    if _ACTIVE.is_set():
+        return {"error": "a run is already in progress — wait for it to finish or hit Stop", "busy": True}
+
+    started = threading.Event()
+    holder: dict[str, str] = {}
+
+    def _on_start(run_id: str) -> None:
+        holder["run_id"] = run_id
+        with _RUNS_LOCK:
+            _RUNS[run_id] = {"status": "running", "result": None}
+        started.set()
+
+    def _worker() -> None:
+        _ACTIVE.set()
+        try:
+            result = run_task(task, mode=mode, on_start=_on_start)
+        except Exception as exc:  # never let the worker thread die silently
+            result = {"status": "error", "task": task, "error": f"{type(exc).__name__}: {exc}"}
+        finally:
+            rid = holder.get("run_id") or (result.get("run_id") if isinstance(result, dict) else None)
+            if rid:
+                with _RUNS_LOCK:
+                    _RUNS[rid] = {"status": "done", "result": result}
+            started.set()  # unblock the waiter even if on_start never fired
+            _ACTIVE.clear()
+
+    threading.Thread(target=_worker, daemon=True).start()
+    started.wait(timeout=15)  # the run folder is created near-instantly
+    rid = holder.get("run_id")
+    if not rid:
+        return {"error": "the run failed to start"}
+    return {"run_id": rid, "status": "running"}
+
+
+def _live_events(run_id: str, since: int) -> list[dict[str, Any]]:
+    """Read new thinking + movement records (seq > ``since``) for ``run_id``.
+
+    Both streams share one monotonically increasing ``seq`` (see runlog._emit),
+    so merging and sorting by ``seq`` yields the true chronological order of
+    'thought, then thought, then the move it triggered, then the next thought'.
+    """
+    base = runlog.base_log_dir()
+    # Validate run_id is a real direct child of the logs dir (no path traversal).
+    run_dir = (base / run_id).resolve()
+    if base.resolve() not in run_dir.parents or not run_dir.is_dir():
+        return []
+    out: list[dict[str, Any]] = []
+    for channel, fname in (("thinking", "thinking.jsonl"), ("movements", "movements.jsonl")):
+        for rec in _read_jsonl(run_dir / fname):
+            if int(rec.get("seq", 0)) > since:
+                rec = dict(rec)
+                rec["channel"] = channel
+                out.append(rec)
+    out.sort(key=lambda r: int(r.get("seq", 0)))
+    return out
+
+
+def live(run_id: str, since: int = 0) -> dict[str, Any]:
+    """Return new live events for ``run_id`` plus run status (for polling).
+
+    ``since`` is the highest ``seq`` the client already has; only newer events
+    are returned. When the run is finished, ``done`` is True and the full
+    structured ``result`` is included so the UI can render the final outcome.
+    """
+    with _RUNS_LOCK:
+        entry = _RUNS.get(run_id)
+    status = entry["status"] if entry else "unknown"
+    events = _live_events(run_id, since)
+    last_seq = int(events[-1]["seq"]) if events else since
+    out: dict[str, Any] = {
+        "run_id": run_id,
+        "status": status,
+        "events": events,
+        "last_seq": last_seq,
+        "done": status == "done",
+    }
+    if status == "done" and entry:
+        out["result"] = entry["result"]
+    return out
 
 
 # --------------------------------------------------------------------------- #
