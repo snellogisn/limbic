@@ -71,14 +71,14 @@ _REPO_ROOT = pathlib.Path(__file__).resolve().parents[3]
 def _camera_offset_mm() -> tuple[float, float]:
     """Constant table-frame correction added to EVERY camera-derived (x, y) (mm).
 
-    Measured on the rig: the localized camera coordinate reads ~15 mm too far
+    Measured on the rig: the localized camera coordinate reads ~20 mm too far
     FORWARD of where the arm actually reaches it (a camera coordinate of 250 mm is
-    the arm's 235 mm), so we subtract 15 mm in +x by default. This only shifts
+    the arm's 230 mm), so we subtract 20 mm in +x by default. This only shifts
     coordinates that come from the camera — typed coordinates and the object-size
     geometry are untouched. Override per axis with ``$LIMBIC_CAM_OFFSET_X_MM`` /
     ``$LIMBIC_CAM_OFFSET_Y_MM`` (re-measure if the rig moves).
     """
-    dx = float(os.environ.get("LIMBIC_CAM_OFFSET_X_MM", "-15.0"))
+    dx = float(os.environ.get("LIMBIC_CAM_OFFSET_X_MM", "-20.0"))
     dy = float(os.environ.get("LIMBIC_CAM_OFFSET_Y_MM", "0.0"))
     return dx, dy
 
@@ -332,11 +332,11 @@ def _detect_one_camera(
                 from limbic.control.localization import pixel_to_table
 
                 x_mm, y_mm = pixel_to_table(u, v, intr, extr)
-                # Measured camera->arm correction (e.g. -15 mm forward). Applied
-                # here, before merge/closest-camera, so every reported target the
-                # brain commands is in the arm's frame.
-                off_x, off_y = _camera_offset_mm()
-                x_mm, y_mm = x_mm + off_x, y_mm + off_y
+                # NOTE: the measured camera->arm offset is NOT applied here. It is
+                # applied ONCE at the very end of read(), so it lands on the FINAL
+                # coordinate whether that's this z=0 read or a stereo-triangulated
+                # (x, y) that overwrites it — otherwise the offset would be silently
+                # dropped for cross-confirmed objects.
                 table_mm = [round(x_mm, 1), round(y_mm, 1)]
             except Exception:
                 table_mm = None  # ray/extrinsics issue — keep the pixel, drop coord
@@ -676,6 +676,18 @@ class ObjectDetections(Input):
                 o.pop("_box", None)
                 o["confirmed"] = False  # single camera -> no cross-verification
             objects = all_objects
+
+        # Apply the measured camera->arm correction ONCE, on the FINAL coordinate of
+        # every object — after closest-camera merge and stereo triangulation — so it
+        # lands the same whether table_mm is a single-camera z=0 read or a parallax-
+        # free triangulated (x, y). (Matching/triangulation above run on the raw
+        # coords; shifting both cameras equally afterwards doesn't change them.)
+        off_x, off_y = _camera_offset_mm()
+        if off_x or off_y:
+            for o in objects:
+                tm = o.get("table_mm")
+                if tm is not None:
+                    o["table_mm"] = [round(tm[0] + off_x, 1), round(tm[1] + off_y, 1)]
 
         calibrated = any(o.get("table_mm") is not None for o in objects)
         result: dict[str, Any] = {
