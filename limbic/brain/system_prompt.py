@@ -63,10 +63,13 @@ Hardware grasp + motion rules (this arm, learned the hard way — follow them):
   release height for you. Better to drop from slightly too high than to ram the lower
   object.
 - TOP-DOWN (90 deg) IS THE PRIORITY for every pick AND place — default to the
-  STEEPEST possible claw angle. WHY THIS MATTERS: the claw lands DEAD-CENTRE on the
-  object only when the wrist is vertical (90 deg tilt / pitch -90). The instant it
-  tilts off vertical the claw sits off-centre, so the grasp or placement consistently
-  MISSES — a tilted grasp only succeeds by luck. Rules, in priority order:
+  STEEPEST possible claw angle. The arm now HOLDS the wrist tilt at its vertical down
+  extreme automatically (the IK pins it there) and only tilts it when a target can't
+  be reached vertical — so your job is to keep grasp targets inside the vertical-
+  reachable band. WHY THIS MATTERS: the claw lands DEAD-CENTRE on the object only when
+  the wrist is vertical (90 deg tilt / pitch -90). The instant it tilts off vertical
+  the claw sits off-centre, so the grasp or placement consistently MISSES — a tilted
+  grasp only succeeds by luck. Rules, in priority order:
     1. If an object CAN be reached with a vertical (90 deg) approach, it ABSOLUTELY
        must be grasped/placed that way — never accept a tilt you could avoid. A
        vertical approach is reachable in the inner band near the workspace centre;

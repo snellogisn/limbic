@@ -60,6 +60,20 @@ _SEED_RAD = {"shoulder_pan": 0.0, "shoulder_lift": -0.3, "elbow_flex": -1.2,
 # Override with $LIMBIC_WRIST_ROLL_DEG. (wrist_flex / tilt stays free.)
 LOCKED_WRIST_ROLL_DEG = float(os.environ.get("LIMBIC_WRIST_ROLL_DEG", "-6.46"))
 
+# ===================== REVERT POINT (pin wrist TILT at -90) =====================
+# CHANGED 2026-06-21 (per Part A): drive wrist_flex (the wrist TILT) to its DOWN
+# extreme for top-down grasps and KEEP it there. -90 arm deg = gripper pointing
+# straight down on this rig (measured in calibration). The solve pins wrist_flex at
+# this value (so the approach is vertical); only if a target can't be reached with
+# the wrist vertical does it RELAX wrist_flex to its full range and re-solve — then,
+# seeded at the down extreme, it tilts the MINIMUM needed (the steepest feasible).
+# REVERT if the IK misbehaves: env LIMBIC_PIN_WRIST_TILT=0 (no code change) returns
+# to the prior position-only behaviour; or set the default below back to "0"/remove.
+# Tune the down value with LIMBIC_WRIST_TILT_DEG. Tag: ik-good-pre-wristtilt90.
+# ===============================================================================
+LOCKED_WRIST_TILT_DEG = float(os.environ.get("LIMBIC_WRIST_TILT_DEG", "-90.0"))
+PIN_WRIST_TILT = os.environ.get("LIMBIC_PIN_WRIST_TILT", "1").strip().lower() in ("1", "true", "on", "yes")
+
 # Accept tolerance for "reached the point". Mid-workspace solves land < 2 mm;
 # the looser 8 mm bound only matters in the close-in fold zone (<~130 mm reach).
 # Genuinely out-of-reach targets stay above this and the caller clamps inward.
@@ -119,6 +133,10 @@ class MinkSO101IK:
         zeros = {j: 0.0 for j in ACTIVE_JOINTS}
         self._roll_ik = calibration.arm_to_ikpy_rad(
             {**zeros, "wrist_roll": LOCKED_WRIST_ROLL_DEG})["wrist_roll"]
+        # wrist_flex DOWN extreme (top-down) in URDF radians — what we pin the tilt to.
+        self._tilt_ik = calibration.arm_to_ikpy_rad(
+            {**zeros, "wrist_flex": LOCKED_WRIST_TILT_DEG})["wrist_flex"]
+        self._wf_pinned = PIN_WRIST_TILT
         for j in ACTIVE_JOINTS:
             jid = mujoco.mj_name2id(self._model, mujoco.mjtObj.mjOBJ_JOINT, j)
             lo, hi = sorted((los[j], his[j]))
@@ -127,6 +145,14 @@ class MinkSO101IK:
                 # other 4 joints (full down-orientation isn't simultaneously
                 # satisfiable with roll fixed; the gripper tilts naturally instead).
                 lo, hi = self._roll_ik - 1e-3, self._roll_ik + 1e-3
+            if j == "wrist_flex":
+                # Pin the TILT at its down extreme (top-down). Keep the FULL range so
+                # the solve can relax to it when a target is unreachable vertical.
+                self._wf_jid = jid
+                self._wf_full = (lo, hi)
+                self._wf_pin = (self._tilt_ik - 1e-3, self._tilt_ik + 1e-3)
+                if PIN_WRIST_TILT:
+                    lo, hi = self._wf_pin
             self._model.jnt_range[jid] = [lo, hi]
             self._model.jnt_limited[jid] = 1
             if j == "shoulder_pan":
@@ -163,6 +189,15 @@ class MinkSO101IK:
             q[self._qadr[j]] = v
         return q
 
+    def _set_wf_range(self, lo: float, hi: float) -> None:
+        """Set the wrist_flex solve range and rebuild the limit.
+
+        mink's ConfigurationLimit copies the joint ranges when built, so it must be
+        rebuilt after mutating ``jnt_range`` for the change to take effect.
+        """
+        self._model.jnt_range[self._wf_jid] = [lo, hi]
+        self._limits = [self._mink.ConfigurationLimit(self._model)]
+
     def solve(self, x: float, y: float, z: float, pitch_deg: float,
               elbow_up: bool = True) -> np.ndarray | None:
         """Table-frame (x, y, z) mm + approach pitch (deg) -> arm degrees[5] or None.
@@ -184,21 +219,38 @@ class MinkSO101IK:
         seed = self._seed.copy()
         pan_rad = float(np.clip(-np.arctan2(y, x), self._pan_lo, self._pan_hi))
         seed[self._qadr["shoulder_pan"]] = pan_rad
-        self._cfg.update(seed)
-        for _ in range(_MAX_ITERS):
-            vel = mink.solve_ik(self._cfg, [self._task], _DT, "daqp", 1e-3,
-                                limits=self._limits)
-            self._cfg.integrate_inplace(vel, _DT)
-            err = np.linalg.norm(
-                self._cfg.get_transform_frame_to_world("tcp", "site").translation()
-                - np.array([bx, by, bz]))
-            if err < _POS_TOL_MM / 1000.0:
-                break
-        else:
-            return None  # never converged within tolerance
 
-        # wrist_roll comes back at its pinned locked value; the other 4 joints
-        # carry the reach.
+        def _converge() -> bool:
+            """Run the differential solve from the seed; True if it reached the point."""
+            self._cfg.update(seed)
+            for _ in range(_MAX_ITERS):
+                vel = mink.solve_ik(self._cfg, [self._task], _DT, "daqp", 1e-3,
+                                    limits=self._limits)
+                self._cfg.integrate_inplace(vel, _DT)
+                err = np.linalg.norm(
+                    self._cfg.get_transform_frame_to_world("tcp", "site").translation()
+                    - np.array([bx, by, bz]))
+                if err < _POS_TOL_MM / 1000.0:
+                    return True
+            return False
+
+        # TOP-DOWN FIRST: wrist_flex is pinned at its down extreme, so the approach is
+        # vertical. If the point can't be reached with the wrist vertical, RELAX
+        # wrist_flex to its full range and re-solve — seeded at the down extreme, the
+        # differential solve then tilts the wrist the MINIMUM needed (steepest feasible
+        # tilt). Restore the pin afterwards so the next call starts vertical again.
+        reached = _converge()
+        if not reached and self._wf_pinned:
+            self._set_wf_range(*self._wf_full)
+            try:
+                reached = _converge()
+            finally:
+                self._set_wf_range(*self._wf_pin)
+        if not reached:
+            return None  # never converged within tolerance, even relaxed
+
+        # wrist_roll comes back at its pinned locked value; wrist_flex at the down
+        # extreme (or the steepest tilt the relax needed); the other joints carry reach.
         ikpy_rad = {j: float(self._cfg.q[self._qadr[j]]) for j in ACTIVE_JOINTS}
         arm_deg = calibration.ikpy_to_arm_deg(ikpy_rad)
         return np.array([arm_deg[j] for j in ACTIVE_JOINTS], dtype=float)
