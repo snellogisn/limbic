@@ -1,0 +1,16 @@
+# limbic vision — your detection class list. EDIT THIS FREELY.
+#
+# One object name per line. Blank lines and #comments are ignored.
+# Open-vocabulary (YOLO-World): any phrase works, not just fixed categories —
+#   e.g.  red mug   /   clear plastic bottle   /   pair of scissors
+# In the live viewer (scripts/vision_detect_demo.py --labels-file classes.txt)
+# press  r  to reload this file WITHOUT restarting.
+
+bottle
+cell phone
+card
+soda can
+toy pear
+toy banana
+red cube
+yellow cube
