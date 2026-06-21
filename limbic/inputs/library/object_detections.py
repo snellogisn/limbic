@@ -71,14 +71,14 @@ _REPO_ROOT = pathlib.Path(__file__).resolve().parents[3]
 def _camera_offset_mm() -> tuple[float, float]:
     """Constant table-frame correction added to EVERY camera-derived (x, y) (mm).
 
-    Measured on the rig: the localized camera coordinate reads ~20 mm too far
+    Measured on the rig: the localized camera coordinate reads ~10 mm too far
     FORWARD of where the arm actually reaches it (a camera coordinate of 250 mm is
-    the arm's 230 mm), so we subtract 20 mm in +x by default. This only shifts
+    the arm's 240 mm), so we subtract 10 mm in +x by default. This only shifts
     coordinates that come from the camera — typed coordinates and the object-size
     geometry are untouched. Override per axis with ``$LIMBIC_CAM_OFFSET_X_MM`` /
     ``$LIMBIC_CAM_OFFSET_Y_MM`` (re-measure if the rig moves).
     """
-    dx = float(os.environ.get("LIMBIC_CAM_OFFSET_X_MM", "-20.0"))
+    dx = float(os.environ.get("LIMBIC_CAM_OFFSET_X_MM", "-10.0"))
     dy = float(os.environ.get("LIMBIC_CAM_OFFSET_Y_MM", "0.0"))
     return dx, dy
 
