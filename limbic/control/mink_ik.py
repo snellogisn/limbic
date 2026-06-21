@@ -58,15 +58,7 @@ _SEED_RAD = {"shoulder_pan": 0.0, "shoulder_lift": -0.3, "elbow_flex": -1.2,
 # full down-orientation, so the solve runs POSITION-ONLY -- which is what we want
 # here, and as a bonus the gripper tilts naturally as it reaches farther out.
 # Override with $LIMBIC_WRIST_ROLL_DEG. (wrist_flex / tilt stays free.)
-#
-# ===================== REVERT POINT (wrist-roll 90deg) =====================
-# CHANGED 2026-06-21: locked roll set to 90deg for top-down picks (per Part A).
-# If the IK starts misbehaving, REVERT by setting this default back to "-6.46"
-# (the prior rig value) -- or run with env LIMBIC_WRIST_ROLL_DEG=-6.46 with no
-# code change. See the commit tagged `ik-good-pre-wristroll90` for the last
-# known-good IK state before this change.
-# ===========================================================================
-LOCKED_WRIST_ROLL_DEG = float(os.environ.get("LIMBIC_WRIST_ROLL_DEG", "90.0"))  # was -6.46
+LOCKED_WRIST_ROLL_DEG = float(os.environ.get("LIMBIC_WRIST_ROLL_DEG", "-6.46"))
 
 # Accept tolerance for "reached the point". Mid-workspace solves land < 2 mm;
 # the looser 8 mm bound only matters in the close-in fold zone (<~130 mm reach).

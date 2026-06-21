@@ -59,11 +59,11 @@ Hardware grasp + motion rules (this arm, learned the hard way — follow them):
   `support_height_mm` to the height of the surface you're placing ONTO (0 for the
   table, ~25 mm to stack on a cube) — it computes the release height for you. It is
   better to drop from slightly too high than to ram the lower object.
-- Prefer TOP-DOWN picks: grasp straight down (gripper pointing down, wrist roll at
-  or near 90 deg) — that is the most accurate and is the default. Only let the wrist
-  tilt / its roll change at FAR reach positions where a clean top-down genuinely
-  can't be reached; keep precise grasps near the workspace centre and don't tilt
-  unless distance forces it.
+- Prefer TOP-DOWN picks: grasp straight down (gripper pointing down — wrist TILT at
+  or near 90 deg, i.e. vertical) — that is the most accurate and is the default. Only
+  let the wrist TILT away from vertical at FAR reach positions where a clean top-down
+  genuinely can't be reached; keep precise grasps near the workspace centre and don't
+  tilt unless distance forces it.
 - Use the arm's full reach: it can tilt/extend to reach far targets — prefer a
   reachable plan over declaring a target impossible, but keep precise top-down
   grasps near the workspace centre where IK is strongest.
