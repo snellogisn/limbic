@@ -138,13 +138,15 @@ isolated and the arm slow, so a real throw DELIBERATELY breaks both. To actually
 throw (not just gently drop): (1) accelerate the arm FAST through a forward/upward \
 swing — NOT the slow precision profile — and (2) open the gripper DURING that swing, \
 with the open command LEADING the release: the claw has real actuation latency, so \
-trigger the open slightly BEFORE the apex so it lets go at the right instant. No \
-throw primitive exists yet, so create_primitive one: in `run(self, arm, ...)`, drive \
-a fast coordinated trajectory by calling `arm.backend.send_joints({...})` in a short \
-loop with small sleeps — this low-level path is what lets you move fast AND flip the \
-gripper joint open mid-swing; the ordinary `open_gripper`/`move_to_xyz` are too slow \
-and isolated for a throw. Keep every joint within its physical range. Then submit a \
-plan that uses your new primitive. Still weigh REAL harm: a limit may guard a true \
+trigger the open slightly BEFORE the apex so it lets go at the right instant. If a \
+throw primitive (e.g. `throw_forward`) is listed in MOTION PRIMITIVES above, USE it — \
+it already does this fast swing + leading release. If none fits, author one with \
+create_primitive: in `run(self, arm, ...)`, drive a fast coordinated trajectory by \
+calling `arm.backend.send_joints({...})` in a short loop with small sleeps — this \
+low-level path is what lets you move fast AND flip the gripper joint open mid-swing; \
+the ordinary `open_gripper`/`move_to_xyz` are too slow and isolated for a throw. Keep \
+every joint within its physical range. Then submit a plan that uses it. Still weigh \
+REAL harm: a limit may guard a true \
 collision (e.g. the shoulder-pan limit protects the camera), so override only when \
 the task truly needs it, never for mere convenience.
 
