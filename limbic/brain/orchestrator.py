@@ -42,7 +42,7 @@ from .tools import SENSE_PREFIX, authoring_tools, input_tools, submit_plan_tool
 
 # Literal model IDs — never date-suffixed. The brain defaults to the most capable
 # model and steps down to the fast one only when routing says so.
-MODEL_FAST = "claude-haiku-4-5"
+MODEL_FAST = "claude-sonnet-4-6"
 MODEL_CAPABLE = "claude-opus-4-8"
 
 # Single-word action verbs that are unambiguous one-shot commands; if an
@@ -329,6 +329,38 @@ def _llm_verifier(client, model: str) -> Callable[..., dict[str, Any]]:
     return verify
 
 
+# Inputs that yield task-relevant WORLD STATE — an object detector fed by the
+# camera (e.g. the YOLO feed reporting what/where/size). Verification + retries
+# only make sense when one of these can supply NEW information about where things
+# are or whether the task actually succeeded. A raw camera FRAME does NOT count:
+# the verifier reasons over a snapshot of structured readings, not an image, so it
+# needs a detector's output — and a raw read would also false-positive on a
+# laptop's built-in webcam, which isn't watching the workspace.
+_VISION_SENSES = ("object_detections", "detections", "objects", "yolo")
+
+
+def _vision_available() -> bool:
+    """True if an object-detection / world-perception input is registered and usable.
+
+    Without one, the only "senses" are the arm's own joint encoders, which can't
+    tell whether a task succeeded or where an object is — so re-reasoning after a
+    move would just be guessing from the same proprioception. In that case the
+    brain runs the plan once, with no verification or retries. Once the detection
+    feed is added to ``inputs/library/``, this flips on automatically.
+    """
+    names = {c["name"] for c in inputs.catalog()}
+    for name in _VISION_SENSES:
+        if name in names:
+            try:
+                reading = inputs.read(name)
+            except Exception:
+                continue
+            # A sense reporting {"ok": False} (not actually producing detections) doesn't count.
+            if not isinstance(reading, dict) or reading.get("ok", True):
+                return True
+    return False
+
+
 def plan_and_run(
     instruction: str,
     arm: Any,
@@ -353,7 +385,10 @@ def plan_and_run(
         verbose: print progress.
         log: open a run folder for the whole cycle (movements + data + thinking).
         max_attempts: how many plan/execute/verify cycles before giving up.
-        verify: run the verification step (False = single shot, assume success).
+        verify: run the post-execution verification + retry cycle. AUTOMATICALLY
+            forced off when no camera/vision input is available — proprioception
+            alone can't confirm a task, so the brain runs the plan once. False =
+            always single shot.
         client: inject an Anthropic-style client (for tests / custom config). If
             None, a real ``anthropic.Anthropic()`` is created and an API key is
             required.
@@ -408,6 +443,18 @@ def plan_and_run(
         trail.thought("model_choice", message=f"routed to {chosen_model}", model=chosen_model)
         if verbose:
             print(f"[brain] instruction: {instruction!r}\n[brain] model: {chosen_model}")
+
+        # Verification + retries require EXTERNAL perception. With only the arm's
+        # own encoders there is no new information to confirm where things are or
+        # whether the task succeeded, so re-reasoning would be guessing — run once.
+        if verify and not _vision_available():
+            verify = False
+            trail.thought(
+                "verify_disabled",
+                message="No camera/vision input — running single-shot (no verification, no retries).",
+            )
+            if verbose:
+                print("[brain] no camera input -> verification + retries OFF (nothing new to perceive)")
 
         for attempt in range(1, max_attempts + 1):
             trail.thought("attempt", message=f"attempt {attempt}/{max_attempts}")

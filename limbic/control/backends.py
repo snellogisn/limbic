@@ -22,6 +22,7 @@ There are two implementations:
 from __future__ import annotations
 
 import abc
+import os
 
 from .config import ArmConfig
 from .kinematics import forward_kinematics
@@ -150,6 +151,31 @@ class RealBackend(HardwareBackend):
                 )
             self._robot.bus.write_calibration(self._robot.calibration)
             self._robot.configure()
+
+        self._apply_servo_acceleration()
+
+    def _apply_servo_acceleration(self) -> None:
+        """Optionally set the servos' internal acceleration for smooth motion.
+
+        These Feetech servos run their own velocity PID + acceleration profile, so
+        the real smoothness lever is the motor's ``Acceleration`` register: with a
+        gentle value each streamed setpoint is RAMPED by the servo instead of
+        snapped at max acceleration (the stop-start jerk). This is far safer and
+        smoother than a software feedback loop over the serial bus.
+
+        Opt-in and tunable via ``$LIMBIC_SERVO_ACCEL`` (an integer; lower = gentler
+        ramp = smoother, higher = snappier; unset leaves whatever lerobot
+        configured). Any failure is warned about but never breaks the connection.
+        """
+        accel = os.environ.get("LIMBIC_SERVO_ACCEL")
+        if not accel:
+            return
+        try:
+            value = int(accel)
+            for motor in self._robot.bus.motors:
+                self._robot.bus.write("Acceleration", motor, value, normalize=False)
+        except Exception as exc:  # firmware/register differences must not break connect
+            print(f"[limbic] could not set servo Acceleration={accel!r}: {exc}")
 
     def disconnect(self) -> None:
         if self._robot is not None:

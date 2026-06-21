@@ -48,8 +48,14 @@ if os.environ.get("LIMBIC_BACKEND", "auto").lower() == "mock":
     os.environ.setdefault("LIMBIC_SLOW_DT", "0.001")
     os.environ.setdefault("LIMBIC_GRIPPER_SETTLE", "0.02")
 else:
-    os.environ.setdefault("LIMBIC_SMOOTH_DT", "0.12")      # ~6x slower than default
-    os.environ.setdefault("LIMBIC_SLOW_DT", "0.18")        # precision moves: very slow
+    # Real (or auto) hardware: SLOW *and* SMOOTH. The slowness comes from a tiny
+    # per-step increment, NOT from long pauses — commands still stream at ~50 Hz,
+    # so the servo glides continuously instead of snapping-then-waiting (the jerk).
+    # Speed ≈ step/dt: 0.25 deg / 0.02 s ≈ 12 deg/s transit, finer/slower for grasps.
+    os.environ.setdefault("LIMBIC_SMOOTH_STEP", "0.25")    # tiny step = slow but smooth
+    os.environ.setdefault("LIMBIC_SMOOTH_DT", "0.02")      # keep the ~50 Hz stream
+    os.environ.setdefault("LIMBIC_SLOW_STEP", "0.15")      # precision moves: finer + slower
+    os.environ.setdefault("LIMBIC_SLOW_DT", "0.02")
     os.environ.setdefault("LIMBIC_GRIPPER_SETTLE", "0.7")
 
 from limbic import RobotArm, runlog  # noqa: E402
