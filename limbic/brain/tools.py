@@ -23,7 +23,9 @@ from __future__ import annotations
 
 from typing import Any
 
+from .._core import required_args
 from ..inputs import registry as inputs
+from ..primitives import authoring
 from ..primitives import registry as primitives
 
 # Prefix for the perception tools, so an input named "camera" becomes the tool
@@ -61,8 +63,6 @@ def _params_to_input_schema(parameters: dict[str, dict[str, Any]]) -> dict[str, 
     model sees the full intent of each argument.
     """
     properties: dict[str, Any] = {}
-    required: list[str] = []
-
     for arg, spec in parameters.items():
         spec = spec or {}
         prop: dict[str, Any] = {
@@ -74,11 +74,12 @@ def _params_to_input_schema(parameters: dict[str, dict[str, Any]]) -> dict[str, 
             # Surface the default so the model knows the arg is optional and what
             # value it falls back to.
             prop["default"] = spec["default"]
-        else:
-            required.append(arg)
         properties[arg] = prop
 
     schema: dict[str, Any] = {"type": "object", "properties": properties}
+    # "required" uses the one shared definition (no "default" key) — same rule the
+    # Capability base validates against, so the schema and the runtime check agree.
+    required = required_args(parameters)
     if required:
         schema["required"] = required
     return schema
@@ -120,40 +121,85 @@ TABLE_FRAME_NOTE = (
 )
 
 
+def authoring_tools() -> list[dict[str, Any]]:
+    """Tools that let the planner extend the skill set when it's stuck.
+
+    The primitive library is *dynamic*: if no existing primitive accomplishes a
+    step, the model can write a new one (``create_primitive``) or fix an existing
+    one (``edit_primitive``). Each takes the full Python file contents for a single
+    :class:`~limbic.primitives.base.Primitive` subclass; the brain validates and
+    hot-reloads it (rolling back on any error) before it can be used in a plan.
+    """
+    contract = (
+        "Provide `name` (lowercase identifier, e.g. 'slide_left') and `code` (the "
+        "FULL contents of the .py file). The file must define ONE Primitive "
+        "subclass whose `name` equals the name you pass, with `summary`, a "
+        "`parameters` dict ({arg: {type, description, default?}}; an arg without a "
+        "default is required), and a `run(self, arm, **kwargs)` that calls ONLY "
+        "RobotArm methods (move_to_xyz, reach_above, descend_to, lift_by, "
+        "open_gripper, close_gripper, set_joint, go_home) so safety + smoothing are "
+        "inherited. After it validates you may reference it in submit_plan. "
+        "Template:\n" + authoring.describe_template()
+    )
+    code_schema = {
+        "type": "object",
+        "properties": {
+            "name": {"type": "string", "description": "The primitive's unique name."},
+            "code": {"type": "string", "description": "Full Python file contents for the primitive."},
+        },
+        "required": ["name", "code"],
+    }
+    return [
+        {
+            "name": "create_primitive",
+            "description": "Create a NEW motion primitive when no existing one fits. " + contract,
+            "input_schema": code_schema,
+        },
+        {
+            "name": "edit_primitive",
+            "description": "Replace an EXISTING motion primitive (to fix or improve it). " + contract,
+            "input_schema": code_schema,
+        },
+    ]
+
+
 def submit_plan_tool() -> dict[str, Any]:
     """The single ``submit_plan`` tool: Claude's one ordered list of steps.
 
-    The plan is an array of ``{"primitive": <enum>, "args": object}`` items,
-    where the ``primitive`` enum is the set of names currently in the registry —
-    so the model literally cannot name a non-existent skill. ``args`` is left as
-    a free-form object (the per-primitive schemas vary and are validated by us in
-    the orchestrator before execution). A ``rationale`` string captures the
-    model's reasoning for the record.
+    The plan is an array of ``{"primitive": <name>, "args": object}`` items. The
+    primitive name is a free string (NOT an enum) on purpose: the model may create
+    a new primitive mid-task with ``create_primitive``, and an enum frozen at
+    tool-build time couldn't include it. We validate every name against the live
+    registry in the orchestrator before any motion, and feed any mistake back for
+    the model to fix. ``args`` is a free-form object validated per-primitive there
+    too. A ``rationale`` string captures the model's reasoning for the record.
 
-    The description tells the model the table frame and the workflow: perceive
-    with ``sense_*`` tools first *only if needed*, then call this once.
+    The description tells the model the table frame, the current skill names, and
+    the workflow: perceive with ``sense_*`` first if needed, create a primitive if
+    a capability is missing, then submit one plan.
     """
     primitive_names = sorted(primitives.all_primitives().keys())
+    names_note = (
+        f" Currently available primitives: {', '.join(primitive_names)}."
+        if primitive_names
+        else ""
+    )
 
     primitive_property: dict[str, Any] = {
         "type": "string",
-        "description": "Name of the motion primitive to run for this step.",
+        "description": (
+            "Name of the motion primitive to run for this step (an existing one, "
+            "or one you just created with create_primitive)."
+        ),
     }
-    # Only constrain to an enum when there actually are primitives; an empty enum
-    # would reject every plan, so degrade gracefully if the library is still
-    # loading.
-    if primitive_names:
-        primitive_property["enum"] = primitive_names
 
     return {
         "name": "submit_plan",
         "description": (
             "Submit the FINAL ordered plan that accomplishes the instruction. "
-            "Call this EXACTLY ONCE, and only after any perception you need. "
-            "Use the sense_* tools first if you must perceive the world (e.g. "
-            "locate an object or check the gripper); if the instruction is fully "
-            "specified you may plan directly. The plan is an ordered list of "
-            "primitive steps executed top to bottom. " + TABLE_FRAME_NOTE
+            "Call this EXACTLY ONCE, after any perception and after creating any "
+            "primitive you need. The plan is an ordered list of primitive steps "
+            "executed top to bottom. " + TABLE_FRAME_NOTE + names_note
         ),
         "input_schema": {
             "type": "object",
