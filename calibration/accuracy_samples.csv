@@ -1,9 +1,1 @@
 ts,pitch,aim_fwd,aim_z,real_fwd,real_z,target_x,target_y,target_z,meas_x,meas_y,meas_z,source,note
-2026-06-20,-90,251.3,129.4,180.3,90.0,200,-100,80,150,-100,90,sweep_offaxis,first sweep; off-centerline y=-100 (low confidence per A.7)
-2026-06-20,-90,264.0,50.9,218.4,40.0,260,-50,30,210,-60,40,sweep,first sweep
-2026-06-20,-90,204.4,207.9,167.6,150.0,120,50,100,160,50,150,sweep,first sweep
-2026-06-20,-90,190.7,168.6,150.0,100.0,120,0,40,150,0,100,sweep_nearfold,first sweep; near-reach fold (low confidence)
-2026-06-20,-90,278.6,35.2,233.2,35.0,250,-150,20,200,-120,35,sweep,first sweep
-2026-06-20,-90,203.9,118.1,165.0,84.0,160,0,60,165,0,84,ruler,centerline ruler check (C1 correction)
-2026-06-20,-90,199.7,87.7,165.0,84.0,160,0,60,165,0,84,ruler,centerline ruler check (C2 correction)
-2026-06-20,-90,190.2,49.4,155.0,30.0,150,0,30,155,0,30,ruler,centerline ruler check (C2 correction)
