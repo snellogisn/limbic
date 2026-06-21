@@ -94,6 +94,14 @@ class Handler(BaseHTTPRequestHandler):
     # ----- POST ---------------------------------------------------------- #
     def do_POST(self) -> None:
         route = urlparse(self.path).path
+
+        # Emergency stop: signal the in-flight run to freeze the arm. Handled on a
+        # SEPARATE thread (ThreadingHTTPServer) from the blocked /api/run request,
+        # so it gets through while a run is mid-motion.
+        if route == "/api/stop":
+            self._send_json(pipeline.request_stop())
+            return
+
         if route != "/api/run":
             self._send_json({"error": "not found"}, status=404)
             return

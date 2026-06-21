@@ -49,6 +49,15 @@ HOME_POSE: dict[str, float] = {j: 0.0 for j in ARM_JOINTS}
 _GRIPPER_HOME: float = sum(JOINT_SOFT_LIMITS[GRIPPER_JOINT]) / 2.0
 
 
+class MotionStopped(Exception):
+    """Raised inside a move when a stop was requested (a cooperative e-stop).
+
+    Stopping just means we stop streaming new setpoints; torque stays engaged, so
+    the arm HOLDS the pose it had reached instead of going limp. The exception
+    unwinds the current primitive/plan so callers can report "stopped".
+    """
+
+
 class RobotArm:
     """High-level, safety-wrapped controller for one arm (real or simulated)."""
 
@@ -58,6 +67,7 @@ class RobotArm:
         backend: HardwareBackend | None = None,
         verbose: bool = True,
         logger=None,
+        stop_event=None,
     ):
         """Create a controller.
 
@@ -69,11 +79,33 @@ class RobotArm:
             logger: Optional explicit :class:`~limbic.runlog.RunLogger`. If omitted,
                 movements are recorded to whatever run is active (``runlog.current()``),
                 so any motion during a ``runlog.run(...)`` block is captured.
+            stop_event: Optional ``threading.Event`` (or anything with ``is_set()``).
+                When set DURING a move, the move stops streaming and raises
+                :class:`MotionStopped`, holding the pose. Lets another thread (e.g.
+                a web "Stop" request) interrupt motion. See :meth:`bind_stop`.
         """
         self.config = config or load_config()
         self.backend = backend or make_backend(self.config, verbose=verbose)
         self._verbose = verbose
         self._logger = logger
+        self._stop_event = stop_event
+
+    def bind_stop(self, stop_event) -> "RobotArm":
+        """Attach a stop signal (``threading.Event``-like) checked during moves."""
+        self._stop_event = stop_event
+        return self
+
+    def _check_stop(self) -> None:
+        """Raise :class:`MotionStopped` if a stop was requested.
+
+        We do NOT send any further setpoints: the servos hold the last commanded
+        position under torque, so the arm freezes in place rather than dropping.
+        """
+        if self._stop_event is not None and self._stop_event.is_set():
+            if self._verbose:
+                print("  [stop] motion stopped by request — holding pose")
+            self._runlog().movement("stopped", reason="stop requested")
+            raise MotionStopped("motion stopped by request")
 
     def _runlog(self):
         """The logger to record to: the explicit one, else the active run (or null)."""
@@ -217,6 +249,8 @@ class RobotArm:
         self._set_gripper(clamp_joint(GRIPPER_JOINT, percent_open))
 
     def _set_gripper(self, value: float) -> None:
+        # Don't start actuating the claw if a stop was requested.
+        self._check_stop()
         # Hold the arm joints, move only the gripper, and let it fully actuate.
         command = {j: self.read_joints()[j] for j in ARM_JOINTS}
         command[GRIPPER_JOINT] = float(value)
@@ -245,6 +279,7 @@ class RobotArm:
         n_steps = max(1, math.ceil(max_travel / step))
 
         for i in range(1, n_steps + 1):
+            self._check_stop()  # cooperative e-stop: freeze before the next setpoint
             ease = 0.5 - 0.5 * math.cos(math.pi * i / n_steps)  # 0 -> 1, smooth
             command = {
                 j: current[j] + (target[j] - current[j]) * ease for j in ARM_JOINTS
@@ -255,6 +290,7 @@ class RobotArm:
 
         # Converge: the streamed trajectory is open-loop, so settle onto the goal.
         for _ in range(25):
+            self._check_stop()
             actual = self.read_joints()
             if max(abs(target[j] - actual[j]) for j in ARM_JOINTS) <= CONVERGE_TOL_DEG:
                 break

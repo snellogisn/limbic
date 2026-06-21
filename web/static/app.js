@@ -6,7 +6,7 @@ function esc(s) {
 }
 
 function badge(status) {
-  const known = ["completed", "cannot_complete", "error"];
+  const known = ["completed", "cannot_complete", "error", "stopped"];
   const cls = known.includes(status) ? status : "unknown";
   const label = (status || "unknown").replace("_", " ");
   return `<span class="badge ${cls}">${esc(label)}</span>`;
@@ -25,12 +25,16 @@ function planHtml(plan) {
 function initAskPage() {
   const taskEl = document.getElementById("task");
   const runBtn = document.getElementById("run");
+  const stopBtn = document.getElementById("stop");
   const busy = document.getElementById("busy");
   const resultEl = document.getElementById("result");
 
   async function submit(task) {
     if (!task.trim()) { taskEl.focus(); return; }
     runBtn.disabled = true;
+    stopBtn.classList.remove("hidden");
+    stopBtn.disabled = false;
+    busy.textContent = "running the pipeline…";
     busy.classList.remove("hidden");
     resultEl.classList.add("hidden");
     try {
@@ -46,8 +50,19 @@ function initAskPage() {
       resultEl.classList.remove("hidden");
     } finally {
       runBtn.disabled = false;
+      stopBtn.classList.add("hidden");
       busy.classList.add("hidden");
     }
+  }
+
+  // Emergency stop: a separate request that freezes the arm mid-motion. The
+  // pending /api/run above then returns with status "stopped".
+  async function stop() {
+    stopBtn.disabled = true;
+    busy.textContent = "stopping…";
+    try {
+      await fetch("/api/stop", { method: "POST" });
+    } catch (e) { /* the run will still return; nothing to do here */ }
   }
 
   function renderResult(r) {
@@ -72,6 +87,7 @@ function initAskPage() {
   }
 
   runBtn.addEventListener("click", () => submit(taskEl.value));
+  stopBtn.addEventListener("click", stop);
   document.querySelectorAll(".test").forEach(btn => {
     btn.addEventListener("click", () => { taskEl.value = btn.dataset.task; submit(btn.dataset.task); });
   });

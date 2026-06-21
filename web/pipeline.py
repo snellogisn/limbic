@@ -64,8 +64,23 @@ else:
     # Acceleration register (backends.py _apply_servo_acceleration) via
     # LIMBIC_SERVO_ACCEL — a hardware value to tune live, left UNSET here on purpose.
 
+import threading  # noqa: E402
+
 from limbic import RobotArm, runlog  # noqa: E402
-from limbic.control import safety  # noqa: E402
+from limbic.control import MotionStopped, safety  # noqa: E402
+
+
+# A single shared stop signal for the in-flight run. The arm checks it during
+# every move (RobotArm.bind_stop), so a separate "Stop" request can freeze the
+# arm mid-motion. One arm => one run at a time, so one Event is enough; it's
+# cleared at the start of each run so a stale stop never carries over.
+_STOP = threading.Event()
+
+
+def request_stop() -> dict[str, Any]:
+    """Signal the in-flight run to stop. Safe to call when nothing is running."""
+    _STOP.set()
+    return {"ok": True, "stopping": True}
 
 
 class CannotComplete(Exception):
@@ -219,10 +234,11 @@ def run_task(task: str, mode: str = "auto") -> dict[str, Any]:
         "error": None,
     }
 
+    _STOP.clear()  # fresh run — never inherit a stale stop request
     run_dir: Path | None = None
     with runlog.run(task, metadata={"source": "web", "mode": result["mode"]}) as log:
         run_dir = log.run_dir
-        arm = RobotArm(verbose=False).connect()
+        arm = RobotArm(verbose=False, stop_event=_STOP).connect()
         try:
             if use_claude:
                 from limbic.brain import plan_and_run
@@ -263,10 +279,16 @@ def run_task(task: str, mode: str = "auto") -> dict[str, Any]:
                     log.thought("plan", rationale, plan=plan)
                     from limbic.primitives.run_sequence import run_plan
 
+                    # Record the plan BEFORE executing, so if the run is stopped
+                    # mid-motion the result still shows what it was doing.
+                    result.update(model="offline-planner", plan=plan, rationale=rationale)
                     run_plan(arm, plan, verbose=False)
-                    result.update(
-                        status="completed", model="offline-planner", plan=plan, rationale=rationale
-                    )
+                    result.update(status="completed")
+        except MotionStopped:
+            # User hit Stop. The arm froze in place (torque held); report it
+            # distinctly from a failure, and keep whatever model/plan we had.
+            log.thought("stopped", "run stopped by user")
+            result.update(status="stopped", error="stopped by user")
         except Exception as exc:  # any unexpected failure -> hard error (not the model's fault)
             log.thought("error", f"{type(exc).__name__}: {exc}")
             result.update(status="error", error=f"{type(exc).__name__}: {exc}")
