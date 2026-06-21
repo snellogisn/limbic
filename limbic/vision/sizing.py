@@ -55,7 +55,8 @@ def object_size_mm(frame, box, intr, extr) -> tuple[float, float]:
 
     from limbic.control.localization import pixel_to_table
 
-    x1, y1, x2, y2 = box
+    # Detection boxes are floats (Grounding DINO); numpy slicing needs ints.
+    x1, y1, x2, y2 = (int(round(v)) for v in box)
     rx1, ry1 = max(x1, 0), max(y1, 0)
     roi = frame[ry1:y2, rx1:x2]
     if roi.size == 0:

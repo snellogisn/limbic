@@ -48,15 +48,16 @@ dist_coeffs = [0.11197489, -0.33401960, 0.00217911, -0.00089367, 0.22996597]
 ```
 
 ### Extrinsics (`extrinsics_CAM_A.npz`)
-solvePnP residual: **0.300 mm** · inliers 150/150 frames · centre_std (4.85, 3.95, 0.92) mm · tag_yaw 90°
+solvePnP residual: **0.160 mm** · inliers 150/150 frames · centre_std (3.08, 3.93, 1.03) mm · tag_yaw 90°
+_Re-measured 2026-06-20 after a small rig drift; supersedes the earlier (2.4, −106.5, 340.0) pose._
 
 ```
 R_cam2base =
-[[-0.00114728, -0.96709662,  0.25440677],
- [-0.99987497, -0.00290291, -0.01554413],
- [ 0.01577119, -0.25439280, -0.96697238]]
+[[-0.00576684, -0.96594366,  0.25868821],
+ [-0.99958376, -0.00174438, -0.02879689],
+ [ 0.02826743, -0.25874660, -0.96553154]]
 
-t_cam2base = [2.38059507, -106.54621747, 339.96464857]   # camera centre in base frame, mm
+t_cam2base = [1.57595658, -101.05552724, 338.38654349]   # camera centre in base frame, mm
 tag_yaw_deg = 90.0
 ```
 
@@ -77,15 +78,16 @@ dist_coeffs = [0.08277258, -0.29172100, 0.00214850, -0.00435495, 0.23720871]
 ```
 
 ### Extrinsics (`extrinsics_CAM_B.npz`)
-solvePnP residual: **0.204 mm** · inliers 150/150 frames · centre_std (1.99, 1.05, 0.41) mm · tag_yaw 90°
+solvePnP residual: **0.205 mm** · inliers 150/150 frames · centre_std (2.95, 1.15, 0.99) mm · tag_yaw 90°
+_Re-measured 2026-06-20 after a small rig drift; supersedes the earlier (3.9, 86.8, 345.0) pose._
 
 ```
 R_cam2base =
-[[ 0.01489072, -0.95634775,  0.29185142],
- [-0.99515961,  0.01418098,  0.09724328],
- [-0.09713713, -0.29188676, -0.95150749]]
+[[ 0.01442700, -0.94290940,  0.33273672],
+ [-0.99540885,  0.01794663,  0.09401670],
+ [-0.09462073, -0.33256546, -0.93832145]]
 
-t_cam2base = [3.85179001, 86.78350374, 344.95687294]   # camera centre in base frame, mm
+t_cam2base = [-2.28110615, 87.79127352, 342.70525899]   # camera centre in base frame, mm
 tag_yaw_deg = 90.0
 ```
 
@@ -111,13 +113,13 @@ np.savez("calib/intrinsics_CAM_A.npz",
     grid=np.array([9, 6]), square_mm=np.array(22.5))
 
 np.savez("calib/extrinsics_CAM_A.npz",
-    R_cam2base=np.array([[-0.00114728, -0.96709662, 0.25440677],
-                         [-0.99987497, -0.00290291, -0.01554413],
-                         [ 0.01577119, -0.25439280, -0.96697238]]),
-    t_cam2base=np.array([2.38059507, -106.54621747, 339.96464857]),
-    tag_yaw_deg=np.array(90.0), resid_mm=np.array(0.29968607),
+    R_cam2base=np.array([[-0.00576684, -0.96594366, 0.25868821],
+                         [-0.99958376, -0.00174438, -0.02879689],
+                         [ 0.02826743, -0.25874660, -0.96553154]]),
+    t_cam2base=np.array([1.57595658, -101.05552724, 338.38654349]),
+    tag_yaw_deg=np.array(90.0), resid_mm=np.array(0.15961),
     inliers=np.array(150), frames_solved=np.array(150),
-    centre_std_mm=np.array([4.85240204, 3.95487802, 0.91685343]))
+    centre_std_mm=np.array([3.08371, 3.93233, 1.02831]))
 
 # ---- CAM_B (HD Pro C920, LEFT) ----
 np.savez("calib/intrinsics_CAM_B.npz",
@@ -129,13 +131,13 @@ np.savez("calib/intrinsics_CAM_B.npz",
     grid=np.array([9, 6]), square_mm=np.array(22.5))
 
 np.savez("calib/extrinsics_CAM_B.npz",
-    R_cam2base=np.array([[ 0.01489072, -0.95634775, 0.29185142],
-                         [-0.99515961,  0.01418098, 0.09724328],
-                         [-0.09713713, -0.29188676, -0.95150749]]),
-    t_cam2base=np.array([3.85179001, 86.78350374, 344.95687294]),
-    tag_yaw_deg=np.array(90.0), resid_mm=np.array(0.20437323),
+    R_cam2base=np.array([[ 0.01442700, -0.94290940, 0.33273672],
+                         [-0.99540885,  0.01794663, 0.09401670],
+                         [-0.09462073, -0.33256546, -0.93832145]]),
+    t_cam2base=np.array([-2.28110615, 87.79127352, 342.70525899]),
+    tag_yaw_deg=np.array(90.0), resid_mm=np.array(0.20498),
     inliers=np.array(150), frames_solved=np.array(150),
-    centre_std_mm=np.array([1.98862467, 1.04852412, 0.40633490]))
+    centre_std_mm=np.array([2.95167, 1.14876, 0.99098]))
 
 print("wrote calib/{intrinsics,extrinsics}_CAM_{A,B}.npz")
 ```
