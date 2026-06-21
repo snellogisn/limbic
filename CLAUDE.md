@@ -276,23 +276,80 @@ Given a camera frame and an object name/prompt, return **where each object is in
 its label and **pixel location (the bounding-box center)** — per the §0.3 #3 seam. That pixel is
 the **"click"** the arm side turns into a table coordinate, so vision is a **drop-in
 replacement for a human click**: produce the same `(label, (u, v))` and everything downstream
-just works. It does **not** do the pixel→table math (that's Part A) and does **not** touch arm
-code; it stays a standalone module behind the interface until integration.
+just works. The detector itself does **not** do the pixel→table math (that's Part A) and does
+**not** touch arm code; it stays a standalone module behind the interface until integration.
+*(The validation/demo viewers below do chain in Part A's localization to print table coords +
+real sizes and to cross-verify across cameras — that's tooling, not the seam; the seam stays
+pixels-only.)*
 
-## B.2 Stack
-- **Open-vocabulary detector** (e.g. **YOLO-World** via `ultralytics` + `torch`) so it can be
-  asked for arbitrary object names without retraining.
-- Runs on the **x64 / Mac / Linux** machine (PyTorch requirement — see §0.4).
+## B.2 Stack — TWO open-vocab detectors (both implemented)
+Both are open-vocabulary (any object name at runtime, no retraining) and both run on the
+**x64 / Mac / Linux** machine (PyTorch — see §0.4).
+- **Grounding DINO (the working live detector)** — HuggingFace `transformers`
+  (`AutoProcessor` + `AutoModelForZeroShotObjectDetection`, `IDEA-Research/grounding-dino-base`,
+  or `-tiny` for speed). This is what the live viewers run and what the recent detection work is
+  built on. Prompt = the class list lowercased, period-separated (`"red cube. block. soda can."`).
+  **Needs `transformers` installed** (not yet in the `vision` extra in `pyproject.toml` — install
+  alongside `torch`).
+- **YOLO-World (the packaged library seam)** — `ultralytics` + `torch`, in
+  `limbic/vision/detector.py`. This is the module that exposes the §0.3 #3 `detect()` API
+  (`Detector` / `Detection`, `set_classes` with re-encode caching). Lighter/faster; kept as the
+  importable seam implementation.
+- **Offline weights (this network blocks model downloads).** An SSL-intercepting proxy breaks
+  both HuggingFace and ultralytics auto-download, so weights are **bundled in the repo and loaded
+  offline**: DINO via `HF_HUB_OFFLINE=1` / `TRANSFORMERS_OFFLINE=1` (set before importing
+  `transformers`) from the local HF cache; YOLO-World from `weights/yolov8s-world.pt` + the CLIP
+  text encoder under `weights/clip/` (the loader is pointed at the bundled dir). `.pt` weights are
+  tracked with **Git LFS**.
 
 ## B.3 Approach
-- Expose `detect(frame, prompt) -> [(label, (u, v)), ...]` — label + bounding-box-center pixel per
-  object, matching §0.3 #3 exactly so it drops straight into the arm's click→coordinate path.
+- **Seam:** `detect(frame, prompt) -> [(label, (u, v)), ...]` — label + bounding-box-center pixel
+  per object, matching §0.3 #3 exactly so it drops straight into the arm's click→coordinate path
+  (`limbic/vision/detector.py`).
+- **Gray-mat workspace filter** (`limbic/vision/workspace.py`). The robot only acts on the gray
+  mat, so detections are restricted to it: find the mat as the largest **low-saturation** blob,
+  fill it (objects/arm sitting on it become "inside"), erode by a margin, and **drop any box that
+  isn't entirely on the mat** (or that touches the frame/edge). **Black is excluded** (the arm is
+  black; no demo object is black), so the arm never reads as workspace.
+- **Class-agnostic NMS** to dedup. Grounding DINO emits several overlapping boxes for one object
+  (worse when the prompt carries synonyms); NMS keeps the highest-scoring box per region. IoU is
+  tuned to **merge duplicates but keep ADJACENT objects apart**.
+- **Detect-on-demand** in the viewers: the live feed just grabs/draws (smooth), and a full-res
+  detection pass runs only on **SPACE**, persisting on screen until the next press — keeps full
+  base-model quality on a static tabletop without bogging the feed.
+- **Dual-camera cross-verification** (`scripts/vision_detect_dual.py`). Run DINO on **both**
+  calibrated cameras, convert each box center to a **table (x, y)** via that camera's calibration,
+  and match across cameras: seen by **both** within a distance threshold → **"confirmed"** (green),
+  seen by **one** → **"single"** (orange). This is the redundancy the Brain can reason over;
+  per §A.5 the actual reading still comes from the camera on the object's side. Extrinsics are
+  **re-solved live** from the AprilTag each pass so a bumped camera still tracks.
+- **Real-world object size — footprint + height** (`object_size_mm` + `fuse_3d`). Segment the
+  object inside its box (coloured/dark vs. the gray mat), fit an **oriented min-area rectangle**,
+  and project its corners to a table-parallel plane → `(long_mm, short_mm)`, orientation-independent
+  (falls back to projecting the axis-aligned box edges when it can't be cleanly segmented). The
+  segmented silhouette is the object's **elevated top**, and the cameras look obliquely (§A.7), so
+  projecting to **z=0 over-reads** (the old ~±10 mm error). Fix: for a **cross-camera-confirmed**
+  object, **triangulate the two box-centre rays** (`_triangulate`) → a **parallax-free `(x, y)`**
+  and the **top-of-object height `z`**, then re-measure the footprint on **that height plane**
+  instead of z=0 (top face ≈ base for vertical-sided objects). Output is `(long, short, height)`
+  with a triangulation **residual** as a quality flag. **Single-camera** objects can't triangulate,
+  so they keep the z=0 footprint and report **no height**.
 - **Validate** that detection is reliable on the **real overhead feed** under the demo's lighting
   and objects — accuracy here directly drives grasp success, so measure it on the rig.
 
 ## B.4 Tune live
-- Detection confidence threshold, prompt phrasing (object names), and robustness on the actual
-  demo objects under the real lighting/camera. These are tuned at the rig, not assumed.
+- **Detector thresholds:** DINO `BOX_THRESH` (box confidence) and `TEXT_THRESH` (per-class
+  text-match — lower helps recall on synonyms); YOLO-World `conf`. Start permissive (NMS dedupes),
+  raise at the rig until false positives disappear.
+- **NMS IoU** — high enough to merge true duplicates, low enough to keep adjacent objects separate.
+- **Gray-mat HSV thresholds** — `sat_max` (raise if the mat is missed), `val_min`/`val_max`
+  (near-black / blown-out cutoffs), edge margin, min-area fraction. Toggle the filter off in the
+  single-cam viewer to see everything.
+- **Cross-verify match distance** (`MATCH_MM`) and inference resolution (`INFER_WIDTH`: full res
+  for crowded scenes, downscale for speed).
+- **Prompt phrasing / class list** (`classes.txt`, or the `CLASSES` list in the viewers) and
+  robustness on the actual demo objects under the real lighting/camera. Tuned at the rig, not
+  assumed.
 
 ---
 
