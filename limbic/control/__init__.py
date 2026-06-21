@@ -9,13 +9,14 @@ Public surface:
 """
 
 from . import safety
-from .arm import HOME_POSE, RobotArm
+from .arm import HOME_POSE, MotionStopped, RobotArm
 from .backends import HardwareBackend, MockBackend, RealBackend, make_backend
 from .config import ArmConfig, load_config
 from .kinematics import IKSolution, forward_kinematics, solve_ik
 
 __all__ = [
     "RobotArm",
+    "MotionStopped",
     "HOME_POSE",
     "ArmConfig",
     "load_config",

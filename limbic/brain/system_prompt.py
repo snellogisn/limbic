@@ -48,6 +48,10 @@ Hardware grasp + motion rules (this arm, learned the hard way — follow them):
 - Use the arm's full reach: it can tilt/extend to reach far targets — prefer a
   reachable plan over declaring a target impossible, but keep precise top-down
   grasps near the workspace centre where IK is strongest.
+- Tracing / drawing happens on the HORIZONTAL plane: treat a constant-z plane as a
+  sheet of paper lying flat on the table and draw on it from above. Vary x and y to
+  draw the shape while holding z FIXED, tool pointing straight down (pitch -90) like
+  a pen on paper. Do NOT trace in a vertical (y-z) plane standing up in the air.
 - PREFER the composite pick and place primitives for grasps: they bake in
   hover -> slow descend -> isolated close -> lift, so you don't have to hand-
   sequence (and risk breaking) these rules. Open before reaching to grasp;

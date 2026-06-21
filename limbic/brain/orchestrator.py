@@ -260,11 +260,14 @@ def _plan_turn(client, model, tools, system, messages, trail, verbose) -> dict |
 # --------------------------------------------------------------------------- #
 def _execute(arm, plan, verbose) -> tuple[list[Any], str | None]:
     """Run the plan on the arm. Returns (results, error_message_or_None)."""
+    from ..control import MotionStopped
     from ..primitives import run_sequence
 
     try:
         results = run_sequence.run_plan(arm, plan, verbose=verbose)
         return results, None
+    except MotionStopped:
+        raise  # a user stop is not a retryable error — abort the whole cycle
     except Exception as exc:
         return [], f"{type(exc).__name__}: {exc}"
 

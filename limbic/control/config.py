@@ -46,7 +46,21 @@ SMOOTH_DT_S = float(os.environ.get("LIMBIC_SMOOTH_DT", "0.02"))       # seconds 
 SLOW_STEP_DEG = float(os.environ.get("LIMBIC_SLOW_STEP", "1.0"))      # precision (descend/grasp/place): finer ...
 SLOW_DT_S = float(os.environ.get("LIMBIC_SLOW_DT", "0.06"))           # ... and slower for controlled fine motion
 CONVERGE_TOL_DEG = 1.2  # hold the goal until servos settle within this band
-GRIPPER_SETTLE_S = float(os.environ.get("LIMBIC_GRIPPER_SETTLE", "0.5"))  # let the claw fully actuate
+GRIPPER_SETTLE_S = float(os.environ.get("LIMBIC_GRIPPER_SETTLE", "0.5"))  # final claw settle once it's stopped
+# The claw is one slow servo with no "done" signal, and it's slower than any fixed
+# guess. So instead of sleeping a constant we DRIVE it to its target and watch the
+# read-back until it physically STOPS moving — reached full open/close, or
+# stalled/clamped on an object. Only then is the claw genuinely done, so a
+# following arm move can't begin mid-grip ("grab and lift at the same time").
+GRIPPER_POLL_S = float(os.environ.get("LIMBIC_GRIPPER_POLL", "0.05"))       # re-command/re-read cadence
+GRIPPER_STOP_TOL = float(os.environ.get("LIMBIC_GRIPPER_STOP_TOL", "1.0"))  # "stopped" when read-back moves < this (% open)
+GRIPPER_MAX_S = float(os.environ.get("LIMBIC_GRIPPER_MAX", "2.5"))          # hard cap so we never wait forever
+# Every motor lags its setpoint — open-loop servos take a moment to physically
+# arrive after the command stream stops. So pause briefly between KEY POINTS (the
+# end of each point-to-point move) before the next action begins. This is what
+# keeps motions DISCRETE: the arm is truly settled before the claw actuates, so
+# the claw acts in real isolation (§0.6) instead of closing mid-drift.
+MOVE_SETTLE_S = float(os.environ.get("LIMBIC_MOVE_SETTLE", "0.5"))  # settle after each point-to-point move
 
 
 @dataclass(frozen=True)

@@ -128,6 +128,10 @@ correctly.
 - **Use the arm's FULL capability.** Reason about how the arm physically moves — it tilts,
   extends, flicks the wrist to reach far. Use the full envelope; don't clamp rigidly; verify
   limits by testing into them.
+- **Tracing/drawing is done on the HORIZONTAL plane.** Treat a **constant-z plane as a sheet of
+  paper lying flat on the table** and draw on it from above: vary **x and y** to draw the shape
+  while holding **z fixed**, tool pointing straight down (pitch −90) like a pen on paper. Do
+  **not** trace in a vertical (y-z) plane standing up in the air.
 - **Grasp rules.** Aim a small offset to one side of the object (claw geometry) and **descend
   WELL into** it (a couple cm, not a tap). This offset applies to **grab/drop ONLY — not push**.
   "Move X cm" = move the claw **tip** that real distance.

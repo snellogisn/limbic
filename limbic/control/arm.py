@@ -24,8 +24,12 @@ from .backends import HardwareBackend, make_backend
 from .config import (
     CONVERGE_TOL_DEG,
     GRIPPER_CLOSED,
+    GRIPPER_MAX_S,
     GRIPPER_OPEN,
+    GRIPPER_POLL_S,
     GRIPPER_SETTLE_S,
+    GRIPPER_STOP_TOL,
+    MOVE_SETTLE_S,
     SLOW_DT_S,
     SLOW_STEP_DEG,
     SMOOTH_DT_S,
@@ -49,6 +53,30 @@ HOME_POSE: dict[str, float] = {j: 0.0 for j in ARM_JOINTS}
 _GRIPPER_HOME: float = sum(JOINT_SOFT_LIMITS[GRIPPER_JOINT]) / 2.0
 
 
+# How close to the OPEN / CLOSED endpoints still counts as that named state.
+_GRIPPER_STATE_TOL: float = 5.0
+
+
+def _gripper_state_label(target: float | None) -> str:
+    """Clean text for a commanded claw target: open / closed / partial / unknown."""
+    if target is None:
+        return "unknown"
+    if target <= GRIPPER_CLOSED + _GRIPPER_STATE_TOL:
+        return "closed"
+    if target >= GRIPPER_OPEN - _GRIPPER_STATE_TOL:
+        return "open"
+    return "partial"
+
+
+class MotionStopped(Exception):
+    """Raised inside a move when a stop was requested (a cooperative e-stop).
+
+    Stopping just means we stop streaming new setpoints; torque stays engaged, so
+    the arm HOLDS the pose it had reached instead of going limp. The exception
+    unwinds the current primitive/plan so callers can report "stopped".
+    """
+
+
 class RobotArm:
     """High-level, safety-wrapped controller for one arm (real or simulated)."""
 
@@ -58,6 +86,7 @@ class RobotArm:
         backend: HardwareBackend | None = None,
         verbose: bool = True,
         logger=None,
+        stop_event=None,
     ):
         """Create a controller.
 
@@ -69,11 +98,56 @@ class RobotArm:
             logger: Optional explicit :class:`~limbic.runlog.RunLogger`. If omitted,
                 movements are recorded to whatever run is active (``runlog.current()``),
                 so any motion during a ``runlog.run(...)`` block is captured.
+            stop_event: Optional ``threading.Event`` (or anything with ``is_set()``).
+                When set DURING a move, the move stops streaming and raises
+                :class:`MotionStopped`, holding the pose. Lets another thread (e.g.
+                a web "Stop" request) interrupt motion. See :meth:`bind_stop`.
         """
         self.config = config or load_config()
         self.backend = backend or make_backend(self.config, verbose=verbose)
         self._verbose = verbose
         self._logger = logger
+        self._stop_event = stop_event
+        # The COMMANDED claw target (0..100), our source of truth for the claw
+        # state. We hold THIS through arm moves, never the read-back: a claw
+        # clamped on an object reads its blocked position (~14%), and
+        # re-commanding that = zero error = zero grip force = the object slips.
+        # Holding the commanded target keeps the clamp pressure on. None until
+        # the first open/close (then we hold the read-back, preserving old behaviour).
+        self._gripper_target: float | None = None
+
+    def bind_stop(self, stop_event) -> "RobotArm":
+        """Attach a stop signal (``threading.Event``-like) checked during moves."""
+        self._stop_event = stop_event
+        return self
+
+    def _check_stop(self) -> None:
+        """Raise :class:`MotionStopped` if a stop was requested.
+
+        We do NOT send any further setpoints: the servos hold the last commanded
+        position under torque, so the arm freezes in place rather than dropping.
+        """
+        if self._stop_event is not None and self._stop_event.is_set():
+            if self._verbose:
+                print("  [stop] motion stopped by request — holding pose")
+            self._runlog().movement("stopped", reason="stop requested")
+            raise MotionStopped("motion stopped by request")
+
+    def _settle(self, seconds: float = MOVE_SETTLE_S) -> None:
+        """Pause briefly so the just-commanded motion physically completes.
+
+        Open-loop servos lag their setpoints: even after we stop streaming, a
+        joint keeps coasting onto its target, and the CLAW especially can take
+        ~half a second to physically reach a commanded open/close. A short settle
+        between key points (the end of each move, and after each claw actuation)
+        keeps motions DISCRETE — the next action starts from a truly settled
+        pose, which is what makes the claw act in real isolation (§0.6) instead
+        of actuating mid-drift. Torque stays engaged, so the arm holds during it.
+        """
+        if seconds <= 0:
+            return
+        self._check_stop()
+        time.sleep(seconds)
 
     def _runlog(self):
         """The logger to record to: the explicit one, else the active run (or null)."""
@@ -205,24 +279,94 @@ class RobotArm:
     # Gripper
     # ------------------------------------------------------------------ #
     def open_gripper(self) -> None:
-        """Open the gripper fully."""
+        """Open the claw ALL THE WAY (state -> OPEN), in isolation.
+
+        Drives to ``GRIPPER_OPEN`` (fully open) so a held object drops cleanly,
+        with the arm held still. The only time the claw should move while the arm
+        moves is a deliberate dynamic release (e.g. a throw), which is its own
+        primitive — the normal open/close are always isolated.
+        """
         self._set_gripper(GRIPPER_OPEN)
 
     def close_gripper(self) -> None:
-        """Close the gripper to its grip position."""
+        """Close the claw ALL THE WAY (state -> CLOSED), in isolation.
+
+        Drives to ``GRIPPER_CLOSED`` (fully closed = 0). With nothing in the claw
+        the fingers shut completely; with an object the servo stalls against it
+        and keeps PRESSURE on (we hold this commanded target through the
+        subsequent lift, so the grip never goes slack and the object can't slip).
+        """
         self._set_gripper(GRIPPER_CLOSED)
 
     def set_gripper(self, percent_open: float) -> None:
-        """Set the gripper to an explicit 0..100 opening (0 = closed, 100 = open)."""
+        """Set the claw to an explicit 0..100 opening (0 = closed, 100 = open)."""
         self._set_gripper(clamp_joint(GRIPPER_JOINT, percent_open))
 
+    @property
+    def gripper_state(self) -> str:
+        """The commanded claw state as clean text: 'open', 'closed', 'partial',
+        or 'unknown' (before any open/close has been commanded)."""
+        return _gripper_state_label(self._gripper_target)
+
+    @property
+    def is_gripping(self) -> bool:
+        """True once the claw has been commanded CLOSED (i.e. holding/clamping)."""
+        return self._gripper_target is not None and self._gripper_target <= GRIPPER_CLOSED + _GRIPPER_STATE_TOL
+
     def _set_gripper(self, value: float) -> None:
-        # Hold the arm joints, move only the gripper, and let it fully actuate.
+        """Actuate the claw to ``value`` (0..100) in STRICT ISOLATION, and only
+        return once it has physically finished.
+
+        Two §0.6 rules are enforced here, in hardware terms:
+
+        * **Isolation.** The arm joints are read once and held FIXED at exactly
+          their current position for the whole actuation — nothing on the arm
+          moves while the hand opens or closes.
+        * **Actually done before moving on.** The claw is one slow servo with no
+          "finished" signal, and it's slower than any fixed sleep. So we DRIVE it
+          and watch its read-back until it physically STOPS — it reached full
+          open/close, or stalled/clamped on an object — then a final settle. Only
+          then do we return, so the next arm move can't start mid-grip (which is
+          what looked like "grabbing and lifting at the same time"). For a free
+          close/open that means it goes ALL THE WAY; against an object it clamps
+          and holds.
+        """
+        # Don't start actuating the claw if a stop was requested.
+        self._check_stop()
+        value = float(value)
+        # Record the commanded target FIRST — it's the claw's source of truth and
+        # what every following arm move will hold (keeps clamp pressure on).
+        self._gripper_target = value
+        # Snapshot the arm pose ONCE and hold exactly that; only the gripper moves.
         command = {j: self.read_joints()[j] for j in ARM_JOINTS}
-        command[GRIPPER_JOINT] = float(value)
-        self.backend.send_joints(command)
-        time.sleep(GRIPPER_SETTLE_S)
-        self._runlog().movement("gripper", percent_open=float(value))
+        command[GRIPPER_JOINT] = value
+
+        # Keep commanding the claw until its read-back goes quiet (two near-still
+        # reads in a row = it has stopped travelling), or we hit the hard cap.
+        prev: float | None = None
+        quiet = 0
+        deadline = time.time() + GRIPPER_MAX_S
+        while True:
+            self._check_stop()
+            self.backend.send_joints(command)
+            time.sleep(GRIPPER_POLL_S)
+            now = self.read_joints().get(GRIPPER_JOINT, value)
+            if prev is not None and abs(now - prev) <= GRIPPER_STOP_TOL:
+                quiet += 1
+                if quiet >= 2:
+                    break
+            else:
+                quiet = 0
+            prev = now
+            if time.time() >= deadline:
+                break
+
+        # Final settle so the clamp pressure stabilises before anything else moves.
+        self._settle(GRIPPER_SETTLE_S)
+        state = _gripper_state_label(value)
+        if self._verbose:
+            print(f"  [claw] {state.upper()} (commanded {value:.0f}% open)")
+        self._runlog().movement("gripper", percent_open=value, state=state)
 
     # ------------------------------------------------------------------ #
     # Smooth interpolated motion (shared by every Cartesian/joint move)
@@ -235,7 +379,13 @@ class RobotArm:
         the joints converge. The gripper is preserved at its current value.
         """
         current = self.read_joints()
-        gripper = current.get(GRIPPER_JOINT, GRIPPER_OPEN)
+        # Hold the COMMANDED claw target, not the read-back: if the claw is
+        # clamped on an object it reads its blocked position, and re-commanding
+        # that releases the grip. Falls back to read-back only before the first
+        # explicit open/close (target is None).
+        gripper = self._gripper_target
+        if gripper is None:
+            gripper = current.get(GRIPPER_JOINT, GRIPPER_OPEN)
 
         target = {j: clamp_joint(j, float(target_joints[j])) for j in ARM_JOINTS}
         step = SLOW_STEP_DEG if slow else SMOOTH_STEP_DEG
@@ -245,6 +395,7 @@ class RobotArm:
         n_steps = max(1, math.ceil(max_travel / step))
 
         for i in range(1, n_steps + 1):
+            self._check_stop()  # cooperative e-stop: freeze before the next setpoint
             ease = 0.5 - 0.5 * math.cos(math.pi * i / n_steps)  # 0 -> 1, smooth
             command = {
                 j: current[j] + (target[j] - current[j]) * ease for j in ARM_JOINTS
@@ -255,6 +406,7 @@ class RobotArm:
 
         # Converge: the streamed trajectory is open-loop, so settle onto the goal.
         for _ in range(25):
+            self._check_stop()
             actual = self.read_joints()
             if max(abs(target[j] - actual[j]) for j in ARM_JOINTS) <= CONVERGE_TOL_DEG:
                 break
@@ -262,3 +414,8 @@ class RobotArm:
             command[GRIPPER_JOINT] = gripper
             self.backend.send_joints(command)
             time.sleep(0.02)
+
+        # Settle between key points: hold here a beat so the arm physically
+        # arrives before the next action (e.g. a claw close) begins — keeps each
+        # point-to-point move discrete and the claw acting in isolation (§0.6).
+        self._settle()
